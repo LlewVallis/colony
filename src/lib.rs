@@ -1,0 +1,960 @@
+#![doc = include_str!("./doc.md")]
+
+#![warn(missing_debug_implementations)]
+
+use crate::index_opt::IndexOpt;
+use std::alloc::{alloc, dealloc, handle_alloc_error, Layout, LayoutError};
+use std::fmt::{Debug, Formatter};
+use std::mem::ManuallyDrop;
+use std::ptr::NonNull;
+use std::{fmt, mem, ptr};
+use std::ops::{Index, IndexMut};
+
+use crate::skipfield::{SkipfieldElement, SkipfieldPtr};
+
+mod guard;
+mod index_opt;
+mod iter;
+mod skipfield;
+
+pub use guard::*;
+pub use iter::*;
+
+const EMPTY_SKIPFIELD: &[SkipfieldElement] = &[0, 0];
+
+#[doc = include_str!("./doc.md")]
+pub struct Colony<T, G: Guard = GenerationGuard> {
+    elements: NonNull<Slot<T, G>>,
+    skipfield: NonNull<SkipfieldElement>,
+    capacity: usize,
+    touched: usize,
+    len: usize,
+    next_free: IndexOpt,
+}
+
+impl<T> Colony<T> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl<T, G: Guard> Default for Colony<T, G> {
+    fn default() -> Self {
+        let skipfield = unsafe {
+            let ptr = EMPTY_SKIPFIELD.as_ptr().add(1) as *mut _;
+            NonNull::new_unchecked(ptr)
+        };
+
+        Self {
+            elements: NonNull::dangling(),
+            skipfield,
+            capacity: 0,
+            touched: 0,
+            len: 0,
+            next_free: IndexOpt::none(),
+        }
+    }
+}
+
+impl<T, G: Guard> Colony<T, G> {
+    const MIN_NON_ZERO_CAP: usize = if mem::size_of::<T>() == 1 {
+        8
+    } else if mem::size_of::<T>() <= 1024 {
+        4
+    } else {
+        1
+    };
+
+    // Preconditions:
+    // * index < touched
+    unsafe fn slot(&self, index: usize) -> &Slot<T, G> {
+        &*self.elements.as_ptr().add(index)
+    }
+
+    // Preconditions:
+    // * index < touched
+    unsafe fn slot_mut(&mut self, index: usize) -> &mut Slot<T, G> {
+        &mut *self.elements.as_ptr().add(index)
+    }
+
+    fn skipfield(&self) -> SkipfieldPtr {
+        SkipfieldPtr::new(self.skipfield)
+    }
+
+    pub fn get(&self, handle: G::Handle) -> Option<&T>
+    where
+        G: CheckedGuard,
+    {
+        let index = G::extract_index(&handle);
+
+        if index >= self.touched {
+            return None;
+        }
+
+        unsafe {
+            let slot = self.slot(index);
+
+            if !slot.guard.check(&handle) {
+                return None;
+            }
+
+            Some(slot.occupied())
+        }
+    }
+
+    pub unsafe fn get_unchecked(&self, index: usize) -> &T {
+        self.slot(index).occupied()
+    }
+
+    pub fn get_mut(&mut self, handle: G::Handle) -> Option<&mut T>
+    where
+        G: CheckedGuard,
+    {
+        let index = G::extract_index(&handle);
+
+        if index >= self.touched {
+            return None;
+        }
+
+        unsafe {
+            let slot = self.slot_mut(index);
+
+            if !slot.guard.check(&handle) {
+                return None;
+            }
+
+            Some(slot.occupied_mut())
+        }
+    }
+
+    pub unsafe fn get_unchecked_mut(&mut self, index: usize) -> &mut T {
+        self.slot_mut(index).occupied_mut()
+    }
+
+    pub fn insert(&mut self, value: T) -> G::Handle {
+        unsafe {
+            if let Some(free) = self.next_free.as_opt() {
+                self.insert_into_free(free, value)
+            } else {
+                self.insert_at_end(value)
+            }
+        }
+    }
+
+    // Preconditions:
+    // * elements[free] is unoccupied and the head of its skipblock
+    // * len < touched
+    unsafe fn insert_into_free(&mut self, free: usize, value: T) -> G::Handle {
+        debug_assert!(self.len < self.touched);
+
+        self.skipfield().unskip_leftmost(free);
+        self.remove_skipblock_from_skiplist(free, free);
+
+        self.len += 1;
+
+        let slot = self.slot_mut(free);
+        slot.fill(value);
+        G::new_handle(&slot.guard, free)
+    }
+
+    // Preconditions:
+    // * len == touched
+    unsafe fn insert_at_end(&mut self, value: T) -> G::Handle {
+        if self.len == self.capacity {
+            self.reserve(1);
+        }
+
+        self.insert_at_end_unchecked(value)
+    }
+
+    // Preconditions:
+    // * len == touched < capacity
+    unsafe fn insert_at_end_unchecked(&mut self, value: T) -> G::Handle {
+        debug_assert!(self.len == self.touched);
+
+        let slot = Slot::new_full(value);
+        let handle = G::new_handle(&slot.guard, self.touched);
+
+        unsafe {
+            self.elements.as_ptr().add(self.touched).write(slot);
+        }
+
+        self.touched += 1;
+        self.len += 1;
+
+        handle
+    }
+
+    pub fn remove(&mut self, handle: G::Handle) -> Option<T>
+    where
+        G: CheckedGuard,
+    {
+        let index = G::extract_index(&handle);
+
+        if index >= self.touched {
+            return None;
+        }
+
+        unsafe {
+            let slot = self.slot_mut(index);
+
+            if !slot.guard.check(&handle) {
+                return None;
+            }
+
+            Some(self.remove_unchecked(index))
+        }
+    }
+
+    // Preconditions:
+    // * elements[index] is occupied
+    pub unsafe fn remove_unchecked(&mut self, index: usize) -> T {
+        unsafe {
+            let (result, reuse) = self.slot_mut(index).empty();
+            let (start, end) = self.skipfield().skip(index);
+
+            if reuse {
+                let has_left = start != index;
+                let has_right = end != index;
+
+                if !has_left && !has_right {
+                    self.stitch_no_left_no_right(index);
+                } else if has_left && !has_right {
+                    self.stitch_only_left(index);
+                } else if !has_left && has_right {
+                    self.stitch_only_right(index);
+                } else {
+                    self.stitch_left_and_right(index, start, end);
+                }
+            }
+
+            self.len -= 1;
+            result
+        }
+    }
+
+    unsafe fn stitch_no_left_no_right(&mut self, index: usize) {
+        self.add_skipblock_to_skiplist(index, index);
+    }
+
+    unsafe fn stitch_only_left(&mut self, index: usize) {
+        let next = mem::replace(
+            &mut self.slot_mut(index - 1).unoccupied_mut().next,
+            IndexOpt::some(index),
+        );
+
+        if let Some(next) = next.as_opt() {
+            self.slot_mut(next).unoccupied_mut().prev = IndexOpt::some(index);
+        }
+
+        *self.slot_mut(index).unoccupied_mut() = Unoccupied {
+            prev: IndexOpt::some(index - 1),
+            next,
+        };
+    }
+
+    unsafe fn stitch_only_right(&mut self, index: usize) {
+        let prev = mem::replace(
+            &mut self.slot_mut(index + 1).unoccupied_mut().prev,
+            IndexOpt::some(index),
+        );
+
+        match prev.as_opt() {
+            Some(prev) => self.slot_mut(prev).unoccupied_mut().next = IndexOpt::some(index),
+            None => self.next_free = IndexOpt::some(index),
+        }
+
+        *self.slot_mut(index).unoccupied_mut() = Unoccupied {
+            prev,
+            next: IndexOpt::some(index + 1),
+        };
+    }
+
+    unsafe fn stitch_left_and_right(&mut self, index: usize, start: usize, end: usize) {
+        self.remove_skipblock_from_skiplist(start, index - 1);
+        self.remove_skipblock_from_skiplist(index + 1, end);
+        self.add_skipblock_to_skiplist(start, end);
+
+        self.slot_mut(index - 1).unoccupied_mut().next = IndexOpt::some(index);
+        self.slot_mut(index + 1).unoccupied_mut().prev = IndexOpt::some(index);
+
+        *self.slot_mut(index).unoccupied_mut() = Unoccupied {
+            prev: IndexOpt::some(index - 1),
+            next: IndexOpt::some(index + 1),
+        };
+    }
+
+    // Preconditions:
+    // * start and end are part of the same skipblock
+    // * start <= end
+    unsafe fn remove_skipblock_from_skiplist(&mut self, start: usize, end: usize) {
+        // Careful not to alias first and last
+        let prev = self.slot_mut(start).unoccupied().prev;
+        let next = self.slot_mut(end).unoccupied().next;
+
+        match prev.as_opt() {
+            Some(prev) => self.slot_mut(prev).unoccupied_mut().next = next,
+            None => self.next_free = next,
+        }
+
+        if let Some(next) = next.as_opt() {
+            self.slot_mut(next).unoccupied_mut().prev = prev;
+        }
+    }
+
+    // Preconditions:
+    // * start <= end
+    // * indices from start through end are all unoccupied, but not in the skiplist
+    unsafe fn add_skipblock_to_skiplist(&mut self, start: usize, end: usize) {
+        self.slot_mut(start).unoccupied_mut().prev = IndexOpt::none();
+        self.slot_mut(end).unoccupied_mut().next = self.next_free;
+
+        if let Some(old_head) = self.next_free.as_opt() {
+            self.slot_mut(old_head).unoccupied_mut().prev = IndexOpt::some(end);
+        }
+
+        self.next_free = IndexOpt::some(start);
+    }
+
+    pub fn reserve(&mut self, additional: usize) {
+        if additional > self.capacity - self.len {
+            unsafe {
+                self.do_reserve(additional);
+            }
+        }
+    }
+
+    // Preconditions:
+    // * len + additional > capacity
+    #[cold]
+    unsafe fn do_reserve(&mut self, additional: usize) {
+        let Some(new_cap) = self.len.checked_add(additional) else {
+            panic!("capacity overflow");
+        };
+
+        // Shouldn't overflow, but doesn't really matter if it does
+        let new_cap = usize::max(new_cap, self.capacity * 2);
+        let new_cap = usize::max(new_cap, Self::MIN_NON_ZERO_CAP);
+
+        self.resize(new_cap);
+    }
+
+    // Preconditions:
+    // * new_cap >= touched
+    unsafe fn resize(&mut self, new_cap: usize) {
+        debug_assert!(new_cap >= self.touched);
+
+        let old_cap = self.capacity;
+
+        let (old_layout, _) = Self::layout(old_cap).unwrap_unchecked();
+        let Ok((new_layout, skipfield_offset)) = Self::layout(new_cap) else {
+            panic!("could not layout");
+        };
+
+        let old_alloc = self.elements.as_ptr() as *mut u8;
+
+        debug_assert_ne!(new_layout.size(), 0);
+        let new_alloc = alloc(new_layout);
+
+        if new_alloc.is_null() {
+            handle_alloc_error(new_layout);
+        }
+
+        let new_elements = new_alloc as *mut Slot<T, G>;
+        let new_skipfield = new_alloc.add(skipfield_offset) as *mut SkipfieldElement;
+        self.copy_memory(new_elements, new_skipfield, new_cap);
+
+        if old_cap > 0 {
+            debug_assert_ne!(old_layout.size(), 0);
+            dealloc(old_alloc, old_layout);
+        }
+
+        self.elements = NonNull::new_unchecked(new_elements);
+        self.skipfield = NonNull::new_unchecked(new_skipfield);
+        self.capacity = new_cap;
+    }
+
+    // Preconditions:
+    // * new_elements, new_skipfield were allocated from a layout of capacity new_cap
+    // * new_cap >= touched
+    unsafe fn copy_memory(
+        &self,
+        new_elements: *mut Slot<T, G>,
+        new_skipfield: *mut SkipfieldElement,
+        new_cap: usize,
+    ) {
+        debug_assert!(new_cap >= self.touched);
+        ptr::copy_nonoverlapping(self.elements.as_ptr(), new_elements, self.touched);
+        self.copy_skipfield(new_skipfield, new_cap);
+    }
+
+    // Preconditions:
+    // * new_skipfield was allocated from a layout of capacity new_cap
+    // * new_cap >= touched
+    unsafe fn copy_skipfield(&self, new_skipfield: *mut SkipfieldElement, new_cap: usize) {
+        let true_old_skipfield = self.skipfield.as_ptr().sub(1);
+        let true_old_skipfield_len = self.touched + 2;
+        let true_new_skipfield = new_skipfield.sub(1);
+        let true_new_skipfield_len = new_cap + 2;
+        let remaining_skipfield = true_new_skipfield.add(true_old_skipfield_len);
+
+        ptr::copy_nonoverlapping(
+            true_old_skipfield,
+            true_new_skipfield,
+            true_old_skipfield_len,
+        );
+
+        ptr::write_bytes(
+            remaining_skipfield,
+            0,
+            true_new_skipfield_len - true_old_skipfield_len,
+        );
+    }
+
+    fn layout(capacity: usize) -> Result<(Layout, usize), LayoutError> {
+        let layout = Layout::array::<Slot<T, G>>(capacity)?;
+        let (layout, _) = layout.extend(Layout::new::<SkipfieldElement>())?;
+        let (layout, skipfield_offset) =
+            layout.extend(Layout::array::<SkipfieldElement>(capacity)?)?;
+        let (layout, _) = layout.extend(Layout::new::<SkipfieldElement>())?;
+
+        Ok((layout, skipfield_offset))
+    }
+
+    pub fn iter(&self) -> Iter<T, G> {
+        Iter::new(self)
+    }
+
+    pub fn values(&self) -> Values<T, G> {
+        Values::new(self)
+    }
+
+    pub fn iter_mut(&mut self) -> IterMut<T, G> {
+        IterMut::new(self)
+    }
+
+    pub fn values_mut(&mut self) -> ValuesMut<T, G> {
+        ValuesMut::new(self)
+    }
+}
+
+impl<T, G: Guard> Drop for Colony<T, G> {
+    fn drop(&mut self) {
+        unsafe {
+            if mem::needs_drop::<T>() {
+                for value in self.values_mut() {
+                    ptr::drop_in_place(value);
+                }
+            }
+
+            if self.capacity > 0 {
+                let (layout, _) = Self::layout(self.capacity).unwrap_unchecked();
+                dealloc(self.elements.as_ptr() as *mut u8, layout);
+            }
+        }
+    }
+}
+
+impl<T, G: CheckedGuard> Index<G::Handle> for Colony<T, G> {
+    type Output = T;
+
+    #[track_caller]
+    fn index(&self, index: G::Handle) -> &T {
+        self.get(index).expect("no element with that handle exists in this colony")
+    }
+}
+
+impl<T, G: CheckedGuard> IndexMut<G::Handle> for Colony<T, G> {
+    #[track_caller]
+    fn index_mut(&mut self, index: G::Handle) -> &mut T {
+        self.get_mut(index).expect("no element with that handle exists in this colony")
+    }
+}
+
+impl<T, G: Guard> Extend<T> for Colony<T, G> {
+    fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
+        let mut iter = iter.into_iter();
+
+        unsafe {
+            while let Some(free) = self.next_free.as_opt() {
+                let Some(value) = iter.next() else { return };
+                self.insert_into_free(free, value);
+            }
+
+            while let Some(value) = iter.next() {
+                if self.len == self.capacity {
+                    let (lower, _) = iter.size_hint();
+                    self.reserve(lower.saturating_add(1));
+                }
+
+                self.insert_at_end_unchecked(value);
+            }
+        }
+    }
+}
+
+impl<T, G: Guard> FromIterator<T> for Colony<T, G> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        let mut result = Self::default();
+        result.extend(iter);
+        result
+    }
+}
+
+impl<T: Clone, G: Guard> Clone for Colony<T, G> {
+    fn clone(&self) -> Self {
+        Self::from_iter(self.values().cloned())
+    }
+}
+
+impl<T: Debug, G: Guard> Debug for Colony<T, G> {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        let iter = self.iter().map(|(_, value)| value);
+        f.debug_list().entries(iter).finish()
+    }
+}
+
+impl<'a, T, G: Guard> IntoIterator for &'a Colony<T, G> {
+    type Item = (G::Handle, &'a T);
+    type IntoIter = Iter<'a, T, G>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        Iter::new(self)
+    }
+}
+
+impl<'a, T, G: Guard> IntoIterator for &'a mut Colony<T, G> {
+    type Item = (G::Handle, &'a mut T);
+    type IntoIter = IterMut<'a, T, G>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        IterMut::new(self)
+    }
+}
+
+struct Slot<T, G: Guard> {
+    guard: G,
+    inner: SlotInner<T>,
+}
+
+union SlotInner<T> {
+    occupied: ManuallyDrop<T>,
+    unoccupied: Unoccupied,
+}
+
+#[derive(Copy, Clone)]
+struct Unoccupied {
+    prev: IndexOpt,
+    next: IndexOpt,
+}
+
+impl<T, G: Guard> Slot<T, G> {
+    pub unsafe fn occupied(&self) -> &T {
+        &self.inner.occupied
+    }
+
+    pub unsafe fn occupied_mut(&mut self) -> &mut T {
+        &mut self.inner.occupied
+    }
+
+    pub unsafe fn unoccupied(&self) -> &Unoccupied {
+        &self.inner.unoccupied
+    }
+
+    pub unsafe fn unoccupied_mut(&mut self) -> &mut Unoccupied {
+        &mut self.inner.unoccupied
+    }
+
+    pub unsafe fn new_full(value: T) -> Self {
+        Self {
+            guard: G::new_full(),
+            inner: SlotInner {
+                occupied: ManuallyDrop::new(value),
+            },
+        }
+    }
+
+    pub unsafe fn fill(&mut self, value: T) {
+        self.guard.fill();
+
+        self.inner = SlotInner {
+            occupied: ManuallyDrop::new(value),
+        };
+    }
+
+    pub unsafe fn empty(&mut self) -> (T, bool) {
+        let value = ManuallyDrop::take(&mut self.inner.occupied);
+
+        self.inner = SlotInner {
+            unoccupied: Unoccupied {
+                prev: IndexOpt::none(),
+                next: IndexOpt::none(),
+            },
+        };
+
+        let reuse = self.guard.empty();
+        (value, reuse)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::cmp::Ordering;
+    use std::fmt::{Debug, Formatter};
+    use std::sync::Arc;
+    use std::{fmt, iter, slice};
+
+    use crate::{Colony, FlagGuard, GenerationGuard, NoGuard};
+
+    const N: &[usize] = &[0, 1, 5, 10, 100, 1_000, 10_000, 100_000];
+
+    #[derive(Clone)]
+    struct Model<T> {
+        slots: Vec<Option<T>>,
+        colony: Colony<T, NoGuard>,
+    }
+
+    impl<T> Model<T> {
+        fn new() -> Self {
+            Self {
+                slots: Vec::new(),
+                colony: Colony::default(),
+            }
+        }
+
+        pub fn insert(&mut self, value: T) -> usize
+        where
+            T: Clone,
+        {
+            let index = self.colony.insert(value.clone());
+
+            match index.cmp(&self.slots.len()) {
+                Ordering::Equal => self.slots.push(Some(value)),
+                Ordering::Less => {
+                    assert!(self.slots[index].is_none());
+                    self.slots[index] = Some(value);
+                }
+                Ordering::Greater => panic!("out of bounds index"),
+            }
+
+            index
+        }
+
+        pub fn remove(&mut self, index: usize)
+        where
+            T: Eq + Debug,
+        {
+            assert!(index < self.slots.len());
+            let Some(expected) = self.slots[index].take() else {
+                panic!("not occupied");
+            };
+
+            let actual = unsafe { self.colony.remove_unchecked(index) };
+
+            assert_eq!(actual, expected);
+        }
+
+        pub fn check(&self)
+        where
+            T: Eq,
+        {
+            let expected = self.slots.iter().filter_map(|slot| slot.as_ref());
+            let actual = self.colony.iter().map(|(_, value)| value);
+            assert!(Iterator::eq(actual, expected));
+        }
+    }
+
+    impl<T: Debug> Debug for Model<T> {
+        fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+            #[derive(Debug)]
+            #[allow(unused)]
+            enum Slot<'a, T> {
+                Occupied(&'a T),
+                Unoccupied {
+                    prev: Option<usize>,
+                    next: Option<usize>,
+                },
+            }
+
+            let mut slots = Vec::new();
+
+            for (i, slot) in self.slots.iter().enumerate() {
+                let slot = match slot {
+                    Some(value) => Slot::Occupied(value),
+                    None => unsafe {
+                        let super::Unoccupied { prev, next } = self.colony.slot(i).unoccupied();
+
+                        Slot::Unoccupied {
+                            prev: prev.as_opt(),
+                            next: next.as_opt(),
+                        }
+                    },
+                };
+
+                slots.push(slot);
+            }
+
+            let skipfield = unsafe {
+                slice::from_raw_parts(self.colony.skipfield.as_ptr(), self.colony.touched)
+            };
+
+            f.debug_struct("Model")
+                .field("len", &self.colony.len)
+                .field("touched", &self.colony.touched)
+                .field("capacity", &self.colony.capacity)
+                .field("next_free", &self.colony.next_free.as_opt())
+                .field("slots", &slots)
+                .field("skipfield", &skipfield)
+                .finish()
+        }
+    }
+
+    #[test]
+    fn drops() {
+        for &size in N {
+            let arc = Arc::new(());
+            let mut colony = Colony::new();
+
+            for _ in 0..size {
+                colony.insert(arc.clone());
+            }
+
+            assert_eq!(Arc::strong_count(&arc), size + 1);
+            drop(colony);
+            assert_eq!(Arc::strong_count(&arc), 1);
+        }
+    }
+
+    #[test]
+    fn get() {
+        let mut colony = Colony::new();
+        let handle = colony.insert(42);
+        assert_eq!(colony.get(handle), Some(&42));
+    }
+
+    #[test]
+    fn get_after_remove_generation() {
+        let mut colony = Colony::<_, GenerationGuard>::new();
+
+        let handle = colony.insert(42);
+        colony.remove(handle);
+
+        assert_eq!(colony.get(handle), None);
+    }
+
+    #[test]
+    fn get_after_remove_flag() {
+        let mut colony = Colony::<_, FlagGuard>::default();
+
+        let handle = colony.insert(42);
+        colony.remove(handle);
+
+        assert_eq!(colony.get(handle), None);
+    }
+
+    #[test]
+    fn get_after_readd() {
+        let mut colony = Colony::new();
+
+        let handle_1 = colony.insert(42);
+        colony.remove(handle_1);
+        let handle_2 = colony.insert(42);
+
+        assert_ne!(handle_1, handle_2);
+        assert_eq!(colony.get(handle_1), None);
+    }
+
+    #[test]
+    fn reserve() {
+        fn test<T>(size: usize) {
+            let mut colony = Colony::<T>::new();
+            colony.reserve(size);
+        }
+
+        for &size in N {
+            test::<()>(size);
+            test::<u8>(size);
+            test::<u32>(size);
+            test::<[u32; 32]>(size);
+        }
+    }
+
+    #[test]
+    fn insert() {
+        fn test<I>(values: I)
+        where
+            I: Iterator,
+            I::Item: Eq + Clone,
+        {
+            let mut model = Model::new();
+
+            for (i, value) in values.enumerate() {
+                let index = model.insert(value);
+                assert_eq!(index, i);
+            }
+
+            model.check();
+        }
+
+        for &size in N {
+            test(iter::repeat(()).take(size));
+            test(iter::repeat(42u8).take(size));
+            test(iter::repeat(42u32).take(size));
+            test(iter::repeat([42u32; 32]).take(size));
+        }
+    }
+
+    #[test]
+    fn remove_all_forward() {
+        for &size in N {
+            let mut model = Model::new();
+
+            for i in 0..size {
+                model.insert(i);
+            }
+
+            for i in 0..size {
+                model.remove(i);
+            }
+
+            model.check();
+        }
+    }
+
+    #[test]
+    fn remove_all_backward() {
+        for &size in N {
+            let mut model = Model::new();
+
+            for i in 0..size {
+                model.insert(i);
+            }
+
+            for i in (0..size).rev() {
+                model.remove(i);
+            }
+
+            model.check();
+        }
+    }
+
+    #[test]
+    fn reuse_slot() {
+        for &size in N {
+            if size == 0 {
+                continue;
+            }
+
+            let mut model = Model::new();
+
+            for i in 0..size {
+                model.insert(i);
+            }
+
+            for i in 0..size {
+                model.remove(i);
+
+                let index = model.insert(i);
+                assert_eq!(index, i);
+            }
+
+            model.check();
+        }
+    }
+
+    #[test]
+    fn join_skipblocks() {
+        let mut model = Model::new();
+
+        for i in 0..5 {
+            model.insert(i);
+        }
+
+        model.remove(1);
+        model.remove(3);
+        model.remove(2);
+
+        model.check();
+    }
+
+    #[test]
+    fn remove_and_readd_twice() {
+        let mut model = Model::new();
+
+        assert_eq!(model.insert(1), 0);
+        model.remove(0);
+        assert_eq!(model.insert(2), 0);
+        assert_eq!(model.insert(3), 1);
+
+        model.check();
+    }
+
+    #[test]
+    fn insert_after_skipblock_join() {
+        let mut model = Model::new();
+
+        assert_eq!(model.insert(1), 0);
+        assert_eq!(model.insert(2), 1);
+        assert_eq!(model.insert(3), 2);
+
+        model.remove(0);
+        model.remove(2);
+        model.remove(1);
+
+        assert_eq!(model.insert(5), 0);
+
+        model.check();
+    }
+
+    #[test]
+    fn skipblock_join_and_reinsert_with_other_skipblock() {
+        let mut model = Model::new();
+
+        model.insert(1);
+        model.insert(2);
+        model.insert(3);
+        model.insert(4);
+        model.insert(5);
+
+        model.remove(4);
+        model.remove(0);
+        model.remove(2);
+        model.remove(1);
+
+        model.insert(6);
+        model.insert(7);
+        model.insert(8);
+        model.insert(9);
+        model.insert(10);
+
+        model.check();
+    }
+
+    #[test]
+    fn multiple_skipblocks_with_join() {
+        let mut model = Model::new();
+
+        model.insert(1);
+        model.insert(1);
+        model.insert(1);
+        model.insert(1);
+        model.insert(1);
+        model.insert(1);
+
+        model.remove(2);
+        model.remove(5);
+        model.remove(0);
+        model.remove(1);
+
+        model.insert(1);
+        model.insert(1);
+
+        model.remove(4);
+
+        model.insert(1);
+        model.insert(1);
+        model.insert(1);
+
+        model.check();
+    }
+}

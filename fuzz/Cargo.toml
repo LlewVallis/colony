@@ -1,0 +1,39 @@
+[package]
+name = "colony-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = { version = "0.4", features = ["arbitrary-derive"] }
+
+[dependencies.colony]
+path = ".."
+
+# Prevent this from interfering with workspaces
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "no_guard"
+path = "fuzz_targets/no_guard.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "flag_guard"
+path = "fuzz_targets/flag_guard.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "generation_guard"
+path = "fuzz_targets/generation_guard.rs"
+test = false
+doc = false
