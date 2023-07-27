@@ -1,86 +1,161 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use rand::prelude::*;
+#![allow(non_snake_case)]
 
 use colony::Colony;
+use iai::black_box;
 
-const ITERATE_SIZES: &[usize] = &[1_000, 10_000, 100_000, 1_000_000, 10_000_000];
+struct Random {
+    state: u128,
+}
+
+impl Random {
+    pub fn new() -> Self {
+        Self { state: 1 }
+    }
+
+    pub fn next(&mut self) -> u64 {
+        self.state *= 0xda942042e4dd58b5;
+        (self.state >> 64) as u64
+    }
+}
 
 #[derive(Copy, Clone)]
 struct Data([usize; 4]);
 
-impl From<usize> for Data {
-    fn from(value: usize) -> Self {
+impl Data {
+    pub fn new(value: usize) -> Self {
         Self([value; 4])
     }
 }
 
-fn build_colony(size: usize, ratio: f64) -> Colony<Data> {
-    let mut rng = SmallRng::seed_from_u64(0);
-
+fn grow_then_iter(size: usize, iters: usize) {
     let mut colony = Colony::new();
-    let mut to_remove = Vec::new();
 
-    for i in 0..size {
-        colony.insert(i.into());
+    for i in 0..black_box(size) {
+        colony.insert(Data::new(i));
+    }
 
-        if !rng.gen_bool(ratio) {
-            to_remove.push(i);
+    for _ in 0..black_box(iters) {
+        for (handle, &value) in &colony {
+            black_box((handle, value));
         }
     }
+}
 
-    to_remove.shuffle(&mut rng);
+fn grow(size: usize) {
+    grow_then_iter(size, 0)
+}
 
-    for i in to_remove {
-        unsafe {
-            colony.remove_unchecked(i);
+fn grow_then_iter_1x(size: usize) {
+    grow_then_iter(size, 1)
+}
+
+fn grow_then_iter_10x(size: usize) {
+    grow_then_iter(size, 10)
+}
+
+fn grow_then_iter_100x(size: usize) {
+    grow_then_iter(size, 100)
+}
+
+fn grow_then_iter_1000x(size: usize) {
+    grow_then_iter(size, 1000)
+}
+
+fn simulation(size: usize, steps: usize) {
+    assert!(size.is_power_of_two());
+
+    let mut random = Random::new();
+    let mut colony = Colony::new();
+
+    for _ in 0..black_box(steps) {
+        let modifications = colony.len();
+
+        for (handle, &value) in &colony {
+            black_box((handle, value));
         }
     }
-
-    colony
 }
 
-fn iterate(c: &mut Criterion, ratio: f64) {
-    let mut group = c.benchmark_group(format!("iterate with {:.0}% occupied", ratio * 100.0));
-
-    for &size in ITERATE_SIZES {
-        let colony = build_colony(size, ratio);
-        group.throughput(Throughput::Elements(size as u64));
-
-        group.bench_with_input(BenchmarkId::from_parameter(size), &colony, |b, input| {
-            b.iter(|| {
-                for (handle, &value) in input.iter() {
-                    black_box(handle);
-                    black_box(value);
-                }
-            });
-        });
-    }
-
-    group.finish();
+macro_rules! cases {
+    ($($rest:tt)*) => {
+        cases_internal!([]; $($rest)*);
+    };
 }
 
-pub fn iterate_dense(c: &mut Criterion) {
-    iterate(c, 1.0);
+macro_rules! cases_internal {
+    ([$($functions:ident)*]; $function:ident($param:expr); $($rest:tt)*) => {
+        paste::paste! {
+            fn [<$function __ $param>]() {
+                $function($param)
+            }
+
+            cases_internal!([$($functions)* [<$function __ $param>]]; $($rest)*);
+        }
+    };
+    ([$($functions:ident)*]; 1..1 $function:ident; $($rest:tt)*) => {
+        cases_internal! {
+            [$($functions)*];
+            $function(1);
+            $($rest)*
+        }
+    };
+    ([$($functions:ident)*]; 1..10 $function:ident; $($rest:tt)*) => {
+        cases_internal! {
+            [$($functions)*];
+            1..1 $function;
+            $function(10);
+            $($rest)*
+        }
+    };
+    ([$($functions:ident)*]; 1..100 $function:ident; $($rest:tt)*) => {
+        cases_internal! {
+            [$($functions)*];
+            1..10 $function;
+            $function(100);
+            $($rest)*
+        }
+    };
+    ([$($functions:ident)*]; 1..1k $function:ident; $($rest:tt)*) => {
+        cases_internal! {
+            [$($functions)*];
+            1..100 $function;
+            $function(1_000);
+            $($rest)*
+        }
+    };
+    ([$($functions:ident)*]; 1..10k $function:ident; $($rest:tt)*) => {
+        cases_internal! {
+            [$($functions)*];
+            1..1k $function;
+            $function(10_000);
+            $($rest)*
+        }
+    };
+    ([$($functions:ident)*]; 1..100k $function:ident; $($rest:tt)*) => {
+        cases_internal! {
+            [$($functions)*];
+            1..10k $function;
+            $function(100_000);
+            $($rest)*
+        }
+    };
+    ([$($functions:ident)*]; 1..1m $function:ident; $($rest:tt)*) => {
+        cases_internal! {
+            [$($functions)*];
+            1..100k $function;
+            $function(1_000_000);
+            $($rest)*
+        }
+    };
+    ([$($functions:ident)*];) => {
+        iai::main!($($functions),*);
+    };
 }
 
-pub fn iterate_half(c: &mut Criterion) {
-    iterate(c, 0.5);
+cases! {
+    1..1m grow;
+    1..1m grow_then_iter_1x;
+    1..1m grow_then_iter_10x;
+    1..100k grow_then_iter_100x;
+    1..10k grow_then_iter_1000x;
 }
-
-pub fn iterate_quater(c: &mut Criterion) {
-    iterate(c, 0.25);
-}
-
-pub fn iterate_1pt(c: &mut Criterion) {
-    iterate(c, 0.01);
-}
-
-criterion_group!(
-    benches,
-    iterate_dense,
-    iterate_half,
-    iterate_quater,
-    iterate_1pt
-);
-
-criterion_main!(benches);

@@ -9,8 +9,8 @@ use crate::skipfield::{SkipfieldElement, SkipfieldPtr, RIGHT};
 use crate::{Colony, GenerationGuard, Slot};
 
 struct RawIter<T, G: Guard = GenerationGuard> {
-    current_skipvalue: NonNull<SkipfieldElement>,
-    current_element: NonNull<Slot<T, G>>,
+    skipfield: NonNull<SkipfieldElement>,
+    elements: NonNull<Slot<T, G>>,
     current_index: usize,
     len: usize,
 }
@@ -18,21 +18,11 @@ struct RawIter<T, G: Guard = GenerationGuard> {
 impl<T, G: Guard> RawIter<T, G> {
     pub(super) fn new(colony: &Colony<T, G>) -> Self {
         Self {
-            current_skipvalue: colony.skipfield,
-            current_element: colony.elements,
+            skipfield: colony.skipfield,
+            elements: colony.elements,
             current_index: 0,
             len: colony.len,
         }
-    }
-
-    unsafe fn advance(&mut self, amount: usize) {
-        let current_element = self.current_element.as_ptr().add(amount);
-        self.current_element = NonNull::new_unchecked(current_element);
-
-        let current_skipvalue = self.current_skipvalue.as_ptr().add(amount);
-        self.current_skipvalue = NonNull::new_unchecked(current_skipvalue);
-
-        self.current_index += amount;
     }
 }
 
@@ -45,18 +35,18 @@ impl<T, G: Guard> Iterator for RawIter<T, G> {
         }
 
         unsafe {
-            let skipfield = SkipfieldPtr::new(self.current_skipvalue);
-            let offset = skipfield.read::<RIGHT>(0);
+            let skipfield = SkipfieldPtr::new(self.skipfield);
+            let offset = skipfield.read::<RIGHT>(self.current_index as isize);
+            self.current_index += offset;
 
-            self.advance(offset);
-
-            let guard = &self.current_element.as_ref().guard;
+            let slot = self.elements.as_ptr().add(self.current_index);
+            let guard = &(*slot).guard;
             let handle = G::new_handle(guard, self.current_index);
 
-            let elem = ptr::addr_of_mut!((*self.current_element.as_ptr()).inner.occupied);
+            let elem = ptr::addr_of_mut!((*slot).inner.occupied);
             let elem = NonNull::new_unchecked(elem as *mut T);
 
-            self.advance(1);
+            self.current_index += 1;
             self.len -= 1;
 
             Some((handle, elem))
@@ -75,8 +65,8 @@ impl<T, G: Guard> ExactSizeIterator for RawIter<T, G> {}
 impl<T, G: Guard> Clone for RawIter<T, G> {
     fn clone(&self) -> Self {
         Self {
-            current_skipvalue: self.current_skipvalue,
-            current_element: self.current_element,
+            skipfield: self.skipfield,
+            elements: self.elements,
             current_index: self.current_index,
             len: self.len,
         }

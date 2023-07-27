@@ -1,14 +1,13 @@
 #![doc = include_str!("./doc.md")]
-
 #![warn(missing_debug_implementations)]
 
 use crate::index_opt::IndexOpt;
 use std::alloc::{alloc, dealloc, handle_alloc_error, Layout, LayoutError};
 use std::fmt::{Debug, Formatter};
 use std::mem::ManuallyDrop;
+use std::ops::{Index, IndexMut};
 use std::ptr::NonNull;
 use std::{fmt, mem, ptr};
-use std::ops::{Index, IndexMut};
 
 use crate::skipfield::{SkipfieldElement, SkipfieldPtr};
 
@@ -68,17 +67,27 @@ impl<T, G: Guard> Colony<T, G> {
     // Preconditions:
     // * index < touched
     unsafe fn slot(&self, index: usize) -> &Slot<T, G> {
+        debug_assert!(index < self.touched);
         &*self.elements.as_ptr().add(index)
     }
 
     // Preconditions:
     // * index < touched
     unsafe fn slot_mut(&mut self, index: usize) -> &mut Slot<T, G> {
+        debug_assert!(index < self.touched);
         &mut *self.elements.as_ptr().add(index)
     }
 
     fn skipfield(&self) -> SkipfieldPtr {
         SkipfieldPtr::new(self.skipfield)
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.capacity
     }
 
     pub fn get(&self, handle: G::Handle) -> Option<&T>
@@ -460,14 +469,16 @@ impl<T, G: CheckedGuard> Index<G::Handle> for Colony<T, G> {
 
     #[track_caller]
     fn index(&self, index: G::Handle) -> &T {
-        self.get(index).expect("no element with that handle exists in this colony")
+        self.get(index)
+            .expect("no element with that handle exists in this colony")
     }
 }
 
 impl<T, G: CheckedGuard> IndexMut<G::Handle> for Colony<T, G> {
     #[track_caller]
     fn index_mut(&mut self, index: G::Handle) -> &mut T {
-        self.get_mut(index).expect("no element with that handle exists in this colony")
+        self.get_mut(index)
+            .expect("no element with that handle exists in this colony")
     }
 }
 
