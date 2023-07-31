@@ -2,7 +2,7 @@
 
 [![Tests](https://github.com/LlewVallis/colony/actions/workflows/ci.yml/badge.svg)](https://github.com/LlewVallis/colony/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/colony)](https://crates.io/crates/colony)
-[![Docs](https://img.shields.io/docsrs/colony)](`https://docs.rs/colony`)
+[![Docs](https://img.shields.io/docsrs/colony)](https://docs.rs/colony)
 
 An unordered data-structure with `O(1)` lookup, removal, iteration and `O(1)` amortized insertion.
 Like a faster `HashMap` that chooses its own keys.
