@@ -73,6 +73,7 @@ impl<T, G: Guard> Clone for RawIter<T, G> {
     }
 }
 
+/// The iterator returned by [`Colony::iter`].
 pub struct Iter<'a, T, G: Guard = GenerationGuard> {
     raw: RawIter<T, G>,
     _marker: PhantomData<&'a T>,
@@ -122,6 +123,7 @@ where
     }
 }
 
+/// The iterator returned by [`Colony::values`].
 pub struct Values<'a, T, G: Guard = GenerationGuard> {
     iter: Iter<'a, T, G>,
 }
@@ -164,6 +166,7 @@ impl<'a, T: Debug, G: Guard> Debug for Values<'a, T, G> {
     }
 }
 
+/// The iterator returned by [`Colony::iter_mut`].
 pub struct IterMut<'a, T, G: Guard = GenerationGuard> {
     raw: RawIter<T, G>,
     _marker: PhantomData<&'a mut T>,
@@ -211,6 +214,7 @@ where
     }
 }
 
+/// The iterator returned by [`Colony::values_mut`].
 pub struct ValuesMut<'a, T, G: Guard = GenerationGuard> {
     iter: IterMut<'a, T, G>,
 }

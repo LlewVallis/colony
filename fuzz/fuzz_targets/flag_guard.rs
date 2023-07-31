@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use libfuzzer_sys::arbitrary::Arbitrary;
 use libfuzzer_sys::{arbitrary, fuzz_target};
-use colony::{Colony, FlagGuard};
+use colony::Colony;
 
 type T = u8;
 
@@ -14,7 +14,7 @@ enum Operation {
 }
 
 fuzz_target!(|operations: Vec<Operation>| {
-    let mut colony = Colony::<_, FlagGuard>::default();
+    let mut colony = Colony::flagged();
     let mut values = HashMap::new();
 
     for operation in operations {

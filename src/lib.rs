@@ -1,14 +1,19 @@
 #![doc = include_str!("./doc.md")]
-#![warn(missing_debug_implementations)]
 
-use crate::index_opt::IndexOpt;
+#![warn(missing_debug_implementations)]
+#![warn(missing_docs)]
+
+use std::{fmt, mem, ptr};
 use std::alloc::{alloc, dealloc, handle_alloc_error, Layout, LayoutError};
 use std::fmt::{Debug, Formatter};
 use std::mem::ManuallyDrop;
 use std::ops::{Index, IndexMut};
 use std::ptr::NonNull;
-use std::{fmt, mem, ptr};
 
+pub use guard::*;
+pub use iter::*;
+
+use crate::index_opt::IndexOpt;
 use crate::skipfield::{SkipfieldElement, SkipfieldPtr};
 
 mod guard;
@@ -16,8 +21,15 @@ mod index_opt;
 mod iter;
 mod skipfield;
 
-pub use guard::*;
-pub use iter::*;
+/// A `Colony` that uses `FlagGuard`, see the documentation for [`Colony`] for more information about guards.
+///
+/// Also see [`Colony::flagged`].
+pub type FlaggedColony<T> = Colony<T, FlagGuard>;
+
+/// A `Colony` that uses `NoGuard`, see the documentation for [`Colony`] for more information about guards.
+///
+/// Also see [`Colony::unguarded`].
+pub type UnguardedColony<T> = Colony<T, NoGuard>;
 
 const EMPTY_SKIPFIELD: &[SkipfieldElement] = &[0, 0];
 
@@ -32,7 +44,52 @@ pub struct Colony<T, G: Guard = GenerationGuard> {
 }
 
 impl<T> Colony<T> {
+    /// Constructs an empty colony using [`GenerationGuard`].
+    ///
+    /// Does not allocate.
+    /// See [`Colony::flagged`] and [`Colony::unguarded`] to create colonies with different guards.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use colony::{Colony, GenerationGuard};
+    /// let colony: Colony<i32, GenerationGuard> = Colony::new();
+    /// ```
     pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl<T> FlaggedColony<T> {
+    /// Constructs an empty colony using [`FlagGuard`].
+    ///
+    /// Does not allocate.
+    /// See [`Colony::new`] and [`Colony::unguarded`] to create colonies with different guards.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use colony::{Colony, FlaggedColony};
+    /// let colony: FlaggedColony<i32> = Colony::flagged();
+    /// ```
+    pub fn flagged() -> Self {
+        Self::default()
+    }
+}
+
+impl<T> UnguardedColony<T> {
+    /// Constructs an empty colony using [`NoGuard`].
+    ///
+    /// Does not allocate.
+    /// See [`Colony::new`] and [`Colony::flagged`] to create colonies with different guards.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use colony::{Colony, UnguardedColony};
+    /// let colony: UnguardedColony<i32> = Colony::unguarded();
+    /// ```
+    pub fn unguarded() -> Self {
         Self::default()
     }
 }
@@ -82,14 +139,75 @@ impl<T, G: Guard> Colony<T, G> {
         SkipfieldPtr::new(self.skipfield)
     }
 
+    /// Returns the total number of elements in the colony.
+    ///
+    ///  # Examples
+    ///
+    /// ```
+    /// # use colony::Colony;
+    /// let mut colony = Colony::new();
+    ///
+    /// let handle = colony.insert("foo");
+    /// assert_eq!(colony.len(), 1);
+    /// colony.remove(handle);
+    /// assert_eq!(colony.len(), 0);
+    /// ```
     pub fn len(&self) -> usize {
         self.len
     }
 
+    /// Returns `true` if there are no elements in the colony.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use colony::Colony;
+    /// let mut colony = Colony::new();
+    /// assert!(colony.is_empty());
+    /// colony.insert("foo");
+    /// assert!(!colony.is_empty());
+    /// ```
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Returns the capacity of the colony.
+    ///
+    /// The colony will not allocate more memory unless the [`len`](Colony::len) would overflow the capacity.
+    /// This means you can be sure that [`insert`](Colony::insert) will not panic while the colony's length is lesser than its capacity.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use colony::Colony;
+    /// let mut colony = Colony::new();
+    ///
+    /// // No space is initially allocated
+    /// assert_eq!(colony.capacity(), 0);
+    ///
+    /// // After insertion space is made for one or more new elements
+    /// colony.insert("foo");
+    /// assert!(colony.capacity() >= 1);
+    /// ```
     pub fn capacity(&self) -> usize {
         self.capacity
     }
 
+    /// Returns a reference to a element by the handle returned by [`insert`](Colony::insert).
+    ///
+    /// Some care needs to be taken with respect to aliasing of handles, see [`Colony`] for more information.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use colony::Colony;
+    /// let mut colony = Colony::new();
+    /// let handle = colony.insert("foo");
+    ///
+    /// assert_eq!(colony.get(handle), Some(&"foo"));
+    /// colony.remove(handle);
+    /// assert_eq!(colony.get(handle), None);
+    /// ```
     pub fn get(&self, handle: G::Handle) -> Option<&T>
     where
         G: CheckedGuard,
@@ -111,10 +229,33 @@ impl<T, G: Guard> Colony<T, G> {
         }
     }
 
+    /// Returns a reference to an element at an index assuming that it exists.
+    ///
+    /// This is mostly useful with [`UnguardedColony`], where the regular [`get`](Colony::get) method cannot be used.
+    ///
+    /// # Safety
+    ///
+    /// An element must exist at the index provided.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use colony::Colony;
+    /// let mut colony = Colony::new();
+    /// let handle = colony.insert("foo");
+    ///
+    /// unsafe {
+    ///     let result = colony.get_unchecked(handle.index);
+    ///     assert_eq!(result, &"foo");
+    /// }
+    /// ```
     pub unsafe fn get_unchecked(&self, index: usize) -> &T {
         self.slot(index).occupied()
     }
 
+    /// Returns a reference to a element by the handle returned by [`insert`](Colony::insert).
+    ///
+    /// See [`get`](Colony::get) for more information.
     pub fn get_mut(&mut self, handle: G::Handle) -> Option<&mut T>
     where
         G: CheckedGuard,
@@ -136,10 +277,35 @@ impl<T, G: Guard> Colony<T, G> {
         }
     }
 
+    /// Returns a mutable reference to an element at an index assuming that it exists.
+    ///
+    /// See [`get_unchecked`](Colony::get_unchecked) for more information.
+    ///
+    /// # Safety
+    ///
+    /// An element must exist at the index provided.
     pub unsafe fn get_unchecked_mut(&mut self, index: usize) -> &mut T {
         self.slot_mut(index).occupied_mut()
     }
 
+    /// Inserts an element into the colony at an unspecified index.
+    ///
+    /// This method has the potential to alias handles with previously inserted and removed elements, or with handles produced from other colonies.
+    /// See the documentation for [`Colony`] for more information about handle aliasing.
+    ///
+    /// # Panics
+    ///
+    /// This method will allocate if the colony's length is equal to its capacity.
+    /// If the allocation fails, this may cause a panic.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use colony::Colony;
+    /// let mut colony = Colony::new();
+    /// let handle = colony.insert("foo");
+    /// assert_eq!(colony[handle], "foo");
+    /// ```
     pub fn insert(&mut self, value: T) -> G::Handle {
         unsafe {
             if let Some(free) = self.next_free.as_opt() {
@@ -194,6 +360,19 @@ impl<T, G: Guard> Colony<T, G> {
         handle
     }
 
+    /// Removes the element with the given handle, if it exists.
+    ///
+    /// Some care needs to be taken with respect to aliasing of handles, see [`Colony`] for more information.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use colony::Colony;
+    /// let mut colony = Colony::new();
+    /// let handle = colony.insert("foo");
+    /// assert_eq!(colony.remove(handle), Some("foo"));
+    /// assert_eq!(colony.remove(handle), None);
+    /// ```
     pub fn remove(&mut self, handle: G::Handle) -> Option<T>
     where
         G: CheckedGuard,
@@ -215,8 +394,26 @@ impl<T, G: Guard> Colony<T, G> {
         }
     }
 
-    // Preconditions:
-    // * elements[index] is occupied
+    /// Removes the element with the given index, assuming it exists.
+    ///
+    /// This is mostly useful with [`UnguardedColony`] where [`remove`](Colony::remove) cannot be used.
+    ///
+    /// # Safety
+    ///
+    /// An element must exist with the index provided.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use colony::Colony;
+    /// let mut colony = Colony::new();
+    /// let handle = colony.insert("foo");
+    ///
+    /// unsafe {
+    ///     let result = colony.remove_unchecked(handle.index);
+    ///     assert_eq!(result, "foo");
+    /// }
+    /// ```
     pub unsafe fn remove_unchecked(&mut self, index: usize) -> T {
         unsafe {
             let (result, reuse) = self.slot_mut(index).empty();
@@ -325,6 +522,24 @@ impl<T, G: Guard> Colony<T, G> {
         self.next_free = IndexOpt::some(start);
     }
 
+    /// Increases the capacity of the colony to at least `self.len() + additional`.
+    ///
+    /// If the colony is already sufficiently large, this is a no-op.
+    /// This can be used as an optimization, or as a way to make sure [`insert`](Colony::insert) won't panic.
+    ///
+    /// # Panics
+    ///
+    /// * If this method allocates, an allocation failure may panic.
+    /// * If the capacity would grow over the (unspecified but reasonable) maximum.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use colony::Colony;
+    /// let mut colony = Colony::<i32>::new();
+    /// colony.reserve(100);
+    /// assert!(colony.capacity() >= 100);
+    /// ```
     pub fn reserve(&mut self, additional: usize) {
         if additional > self.capacity - self.len {
             unsafe {
@@ -430,18 +645,54 @@ impl<T, G: Guard> Colony<T, G> {
         Ok((layout, skipfield_offset))
     }
 
+    /// Creates an iterator over the values in the colony and their handles.
+    ///
+    /// If you want an iterator over only the values (and not the handles) then call [`values`](Colony::values).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use colony::Colony;
+    /// let mut colony = Colony::new();
+    /// let foo = colony.insert("foo");
+    /// let bar = colony.insert("bar");
+    ///
+    /// let expected = [(foo, &"foo"), (bar, &"bar")].into_iter();
+    /// assert!(Iterator::eq(colony.iter(), expected));
+    /// ```
     pub fn iter(&self) -> Iter<T, G> {
         Iter::new(self)
     }
 
+    /// Creates an iterator over just the values of the colony.
+    ///
+    /// If you want to iterate over the handle for each value too, call [`iter`](Colony::iter).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use colony::Colony;
+    /// let mut colony = Colony::new();
+    /// colony.insert("foo");
+    /// colony.insert("bar");
+    ///
+    /// let expected = ["foo", "bar"].iter();
+    /// assert!(Iterator::eq(colony.values(), expected));
+    /// ```
     pub fn values(&self) -> Values<T, G> {
         Values::new(self)
     }
 
+    /// Creates an iterator over the values in the colony and their handles, by mutable reference.
+    ///
+    /// See [`iter`](Colony::iter).
     pub fn iter_mut(&mut self) -> IterMut<T, G> {
         IterMut::new(self)
     }
 
+    /// Creates an iterator over just the values in the colony, by mutable reference.
+    ///
+    /// See [`values`](Colony::values).
     pub fn values_mut(&mut self) -> ValuesMut<T, G> {
         ValuesMut::new(self)
     }
@@ -467,7 +718,6 @@ impl<T, G: Guard> Drop for Colony<T, G> {
 impl<T, G: CheckedGuard> Index<G::Handle> for Colony<T, G> {
     type Output = T;
 
-    #[track_caller]
     fn index(&self, index: G::Handle) -> &T {
         self.get(index)
             .expect("no element with that handle exists in this colony")
@@ -475,7 +725,6 @@ impl<T, G: CheckedGuard> Index<G::Handle> for Colony<T, G> {
 }
 
 impl<T, G: CheckedGuard> IndexMut<G::Handle> for Colony<T, G> {
-    #[track_caller]
     fn index_mut(&mut self, index: G::Handle) -> &mut T {
         self.get_mut(index)
             .expect("no element with that handle exists in this colony")
@@ -610,19 +859,19 @@ impl<T, G: Guard> Slot<T, G> {
 
 #[cfg(test)]
 mod test {
+    use std::{fmt, iter, slice};
     use std::cmp::Ordering;
     use std::fmt::{Debug, Formatter};
     use std::sync::Arc;
-    use std::{fmt, iter, slice};
 
-    use crate::{Colony, FlagGuard, GenerationGuard, NoGuard};
+    use crate::{Colony, UnguardedColony};
 
     const N: &[usize] = &[0, 1, 5, 10, 100, 1_000, 10_000, 100_000];
 
     #[derive(Clone)]
     struct Model<T> {
         slots: Vec<Option<T>>,
-        colony: Colony<T, NoGuard>,
+        colony: UnguardedColony<T>,
     }
 
     impl<T> Model<T> {
@@ -745,7 +994,7 @@ mod test {
 
     #[test]
     fn get_after_remove_generation() {
-        let mut colony = Colony::<_, GenerationGuard>::new();
+        let mut colony = Colony::new();
 
         let handle = colony.insert(42);
         colony.remove(handle);
@@ -755,7 +1004,7 @@ mod test {
 
     #[test]
     fn get_after_remove_flag() {
-        let mut colony = Colony::<_, FlagGuard>::default();
+        let mut colony = Colony::flagged();
 
         let handle = colony.insert(42);
         colony.remove(handle);

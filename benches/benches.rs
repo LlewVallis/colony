@@ -1,7 +1,9 @@
+#![recursion_limit = "1024"]
 #![allow(non_snake_case)]
 
-use colony::Colony;
 use iai::black_box;
+
+use colony::Colony;
 
 struct Random {
     state: u128,
@@ -45,6 +47,32 @@ fn grow(size: usize) {
     grow_then_iter(size, 0)
 }
 
+fn simulate(size: usize, steps: usize) {
+    assert!(size.is_power_of_two());
+    let index_mask = (size * 2) - 1;
+
+    let mut random = Random::new();
+    let mut colony = Colony::flagged();
+
+    for _ in 0..black_box(steps) {
+        let modifications = size / 10;
+
+        for _ in 0..modifications {
+            let index = random.next() as usize & index_mask;
+
+            if let Some(value) = colony.remove(index) {
+                black_box(value);
+            } else {
+                colony.insert(Data::new(index));
+            }
+        }
+
+        for (handle, &value) in &colony {
+            black_box((handle, value));
+        }
+    }
+}
+
 fn grow_then_iter_1x(size: usize) {
     grow_then_iter(size, 1)
 }
@@ -61,19 +89,16 @@ fn grow_then_iter_1000x(size: usize) {
     grow_then_iter(size, 1000)
 }
 
-fn simulation(size: usize, steps: usize) {
-    assert!(size.is_power_of_two());
+fn simulate_small() {
+    simulate(128, 100_000);
+}
 
-    let mut random = Random::new();
-    let mut colony = Colony::new();
+fn simulate_medium() {
+    simulate(16 * 1024, 500);
+}
 
-    for _ in 0..black_box(steps) {
-        let modifications = colony.len();
-
-        for (handle, &value) in &colony {
-            black_box((handle, value));
-        }
-    }
+fn simulate_large() {
+    simulate(1024 * 1024, 50);
 }
 
 macro_rules! cases {
@@ -83,13 +108,16 @@ macro_rules! cases {
 }
 
 macro_rules! cases_internal {
+    ([$($functions:ident)*]; $function:ident; $($rest:tt)*) => {
+        cases_internal!([$($functions)* $function]; $($rest)*);
+    };
     ([$($functions:ident)*]; $function:ident($param:expr); $($rest:tt)*) => {
         paste::paste! {
             fn [<$function __ $param>]() {
                 $function($param)
             }
 
-            cases_internal!([$($functions)* [<$function __ $param>]]; $($rest)*);
+            cases_internal!([$($functions)*]; [<$function __ $param>]; $($rest)*);
         }
     };
     ([$($functions:ident)*]; 1..1 $function:ident; $($rest:tt)*) => {
@@ -153,6 +181,9 @@ macro_rules! cases_internal {
 }
 
 cases! {
+    simulate_small;
+    simulate_medium;
+    simulate_large;
     1..1m grow;
     1..1m grow_then_iter_1x;
     1..1m grow_then_iter_10x;

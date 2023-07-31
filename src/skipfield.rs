@@ -4,8 +4,11 @@ use std::ptr::NonNull;
 pub type SkipfieldElement = u8;
 
 pub type Direction = i8;
+
 pub const LEFT: Direction = -1;
 pub const RIGHT: Direction = 1;
+
+const SENTINEL: SkipfieldElement = 255;
 
 #[derive(Copy, Clone)]
 pub struct SkipfieldPtr {
@@ -61,7 +64,7 @@ impl SkipfieldPtr {
     pub unsafe fn read<const DIR: Direction>(&self, index: isize) -> usize {
         let ptr = self.ptr.as_ptr().offset(index);
 
-        if *ptr < SkipfieldElement::MAX {
+        if *ptr < SENTINEL {
             *ptr as usize
         } else {
             *Self::spilled_addr::<DIR>(ptr)
@@ -74,33 +77,22 @@ impl SkipfieldPtr {
     unsafe fn write<const DIR: Direction>(&self, index: isize, value: usize) {
         let ptr = self.ptr.as_ptr().offset(index);
 
-        if value < SkipfieldElement::MAX as usize {
+        if value < SENTINEL as usize {
             *ptr = value as SkipfieldElement;
         } else {
-            *ptr = SkipfieldElement::MAX;
+            *ptr = SENTINEL;
             *Self::spilled_addr::<DIR>(ptr) = value;
         }
     }
 
-    fn spilled_addr<const DIR: Direction>(ptr: *mut SkipfieldElement) -> *mut usize {
-        let align = mem::align_of::<usize>();
+    unsafe fn spilled_addr<const DIR: Direction>(ptr: *mut SkipfieldElement) -> *mut usize {
+        assert_eq!(mem::size_of::<SkipfieldElement>(), 1);
+
         let ptr_addr = ptr as usize;
+        let usize_size = mem::size_of::<usize>();
+        let offset = (usize_size as isize * DIR as isize) - (ptr_addr % usize_size) as isize;
 
-        // Rounded down to the next multiple of align
-        let max_addr = match DIR {
-            LEFT => ptr_addr - mem::size_of::<usize>(),
-            RIGHT => ptr_addr + mem::size_of::<SkipfieldElement>() + mem::size_of::<usize>() - 1,
-            _ => panic!("invalid direction"),
-        };
-
-        let new_addr = max_addr - max_addr % align;
-
-        debug_assert!(new_addr % align == 0);
-
-        unsafe {
-            let offset = new_addr.wrapping_sub(ptr_addr) as isize;
-            (ptr as *mut u8).offset(offset) as *mut usize
-        }
+        ptr.offset(offset) as *mut usize
     }
 }
 

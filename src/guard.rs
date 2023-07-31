@@ -4,7 +4,14 @@ use std::hash::Hash;
 
 use crate::guard::sealed::Sealed;
 
+/// A guard for each element in a colony to ensure safe usage.
+///
+/// This is a sealed trait, so only one of the supported guards can be used.
+/// Also, any `#[doc(hidden)]` member of this trait should not be considered as part of the public API.
+///
+/// See [`Colony`] for more information about guards.
 pub trait Guard: Sealed {
+    /// The type used to identify elements in a colony using this guard.
     type Handle;
 
     #[doc(hidden)]
@@ -23,11 +30,15 @@ pub trait Guard: Sealed {
     unsafe fn empty(&mut self) -> bool;
 }
 
+/// A marker trait for a [`Guard`] that enables use of safe methods like [`Colony::get`].
 pub trait CheckedGuard: Guard {
     #[doc(hidden)]
     fn check(&self, handle: &Self::Handle) -> bool;
 }
 
+/// A ZST guard that provides minimal guarantees.
+///
+/// See [`Colony`] for more information about guards.
 #[non_exhaustive]
 #[allow(missing_debug_implementations)]
 pub struct NoGuard;
@@ -56,6 +67,9 @@ impl Guard for NoGuard {
 
 impl Sealed for NoGuard {}
 
+/// A `bool` guard that provides just basic safety guarantees.
+///
+/// See [`Colony`] for more information about guards.
 #[allow(missing_debug_implementations)]
 pub struct FlagGuard {
     occupied: bool,
@@ -94,6 +108,7 @@ impl CheckedGuard for FlagGuard {
 
 impl Sealed for FlagGuard {}
 
+/// An opaque generation assigned to a [`Handle`].
 // An even value indicates an occupied slot, we can never leak an odd value
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct Generation(#[cfg(not(fuzzing))] u32, #[cfg(fuzzing)] pub u32);
@@ -105,12 +120,26 @@ impl Debug for Generation {
     }
 }
 
+/// Used to identify elements within a [`Colony`] when [`GenerationGuard`] (the default) is being used.
+///
+/// Pass this handle to methods such as [`Colony::get`] or [`Colony::remove`].
+///
+/// A handle is composed of an index and a generation.
+/// When an element is removed at an index in a colony, the generation is incremented.
+/// This generation is checked to make sure a handle created for a deleted element cannot be used to access a new element sharing the same index.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct Handle {
+    /// The index of the element referred to by the handle.
+    ///
+    /// This can be used in conjunction with [`Colony::get_unchecked`], for example.
     pub index: usize,
+    /// The generation of the handle.
     pub generation: Generation,
 }
 
+/// The default guard that prevents aliasing of handles within a single colony.
+///
+/// See [`Colony`] for more information about guards.
 #[allow(missing_debug_implementations)]
 pub struct GenerationGuard {
     generation: Generation,
