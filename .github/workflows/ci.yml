@@ -13,9 +13,11 @@ env:
 
 jobs:
   test:
+    name: Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout
+        uses: actions/checkout@v3
       - name: Build
         run: cargo build --verbose
       - name: Format
@@ -24,14 +26,26 @@ jobs:
         run: cargo doc --verbose
       - name: Run tests
         run: cargo test --verbose
+  publish-dry-run:
+    name: Publish dry run
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Publish dry run
+        run: cargo publish --dry-run
   fuzz:
+    name: Fuzz
     runs-on: ubuntu-latest
     strategy:
       matrix:
         target: ["generation_guard", "flag_guard", "no_guard"]
     steps:
-      - uses: actions/checkout@v3
-      - run: rustup update nightly
-      - run: cargo install cargo-fuzz
-      - name: Fuzz ${{ matrix.target }}
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Install nightly
+        run: rustup update nightly
+      - name: Install cargo fuzz
+        run: cargo install cargo-fuzz
+      - name: Fuzz
         run: cargo +nightly fuzz run ${{ matrix.target }} -- -runs=500000

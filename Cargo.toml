@@ -2,6 +2,14 @@
 name = "colony"
 version = "0.1.0"
 edition = "2021"
+description = "A fast associative data-structure that chooses its own keys"
+license = "MIT"
+documentation = "https://docs.rs/colony"
+readme = "README.md"
+homepage = "https://github.com/LlewVallis/colony"
+repository = "https://github.com/LlewVallis/colony"
+categories = ["data-structures"]
+include = ["Cargo.toml", "src", "benches", "README.md", "LICENSE"]
 
 [dev-dependencies]
 iai = "0.1.1"
