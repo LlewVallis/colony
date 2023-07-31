@@ -1,14 +1,14 @@
 #![doc = include_str!("./doc.md")]
-
 #![warn(missing_debug_implementations)]
 #![warn(missing_docs)]
 
-use std::{fmt, mem, ptr};
 use std::alloc::{alloc, dealloc, handle_alloc_error, Layout, LayoutError};
 use std::fmt::{Debug, Formatter};
 use std::mem::ManuallyDrop;
 use std::ops::{Index, IndexMut};
+use std::panic::{RefUnwindSafe, UnwindSafe};
 use std::ptr::NonNull;
+use std::{fmt, mem, ptr};
 
 pub use guard::*;
 pub use iter::*;
@@ -792,6 +792,34 @@ impl<'a, T, G: Guard> IntoIterator for &'a mut Colony<T, G> {
     }
 }
 
+unsafe impl<T, G: Guard> Send for Colony<T, G>
+where
+    T: Send,
+    G: Send,
+{
+}
+
+unsafe impl<T, G: Guard> Sync for Colony<T, G>
+where
+    T: Sync,
+    G: Sync,
+{
+}
+
+impl<T, G: Guard> UnwindSafe for Colony<T, G>
+where
+    T: UnwindSafe,
+    G: UnwindSafe,
+{
+}
+
+impl<T, G: Guard> RefUnwindSafe for Colony<T, G>
+where
+    T: RefUnwindSafe,
+    G: RefUnwindSafe,
+{
+}
+
 struct Slot<T, G: Guard> {
     guard: G,
     inner: SlotInner<T>,
@@ -859,10 +887,10 @@ impl<T, G: Guard> Slot<T, G> {
 
 #[cfg(test)]
 mod test {
-    use std::{fmt, iter, slice};
     use std::cmp::Ordering;
     use std::fmt::{Debug, Formatter};
     use std::sync::Arc;
+    use std::{fmt, iter, slice};
 
     use crate::{Colony, UnguardedColony};
 

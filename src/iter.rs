@@ -1,6 +1,7 @@
 use std::fmt::{Debug, Formatter};
 use std::iter::FusedIterator;
 use std::marker::PhantomData;
+use std::panic::{RefUnwindSafe, UnwindSafe};
 use std::ptr::NonNull;
 use std::{fmt, ptr};
 
@@ -72,6 +73,14 @@ impl<T, G: Guard> Clone for RawIter<T, G> {
         }
     }
 }
+
+unsafe impl<T, G: Guard> Send for RawIter<T, G> where Colony<T, G>: Sync {}
+
+unsafe impl<T, G: Guard> Sync for RawIter<T, G> where Colony<T, G>: Sync {}
+
+impl<T, G: Guard> UnwindSafe for RawIter<T, G> where Colony<T, G>: RefUnwindSafe {}
+
+impl<T, G: Guard> RefUnwindSafe for RawIter<T, G> where Colony<T, G>: RefUnwindSafe {}
 
 /// The iterator returned by [`Colony::iter`].
 pub struct Iter<'a, T, G: Guard = GenerationGuard> {

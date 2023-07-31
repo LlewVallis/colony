@@ -4,6 +4,9 @@ use std::hash::Hash;
 
 use crate::guard::sealed::Sealed;
 
+#[cfg(doc)]
+use crate::Colony;
+
 /// A guard for each element in a colony to ensure safe usage.
 ///
 /// This is a sealed trait, so only one of the supported guards can be used.
