@@ -1,6 +1,7 @@
 use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::hash::Hash;
+use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::guard::sealed::Sealed;
@@ -25,10 +26,15 @@ pub trait Guard: Sealed {
     fn __new() -> Self;
 
     #[doc(hidden)]
-    fn __new_id() -> Self::__Id;
+    fn __sentinel_id() -> Self::__Id;
 
     #[doc(hidden)]
-    fn __new_handle(&self, index: usize, colony_id: Self::__Id) -> Self::Handle;
+    fn __new_id() -> Self::__Id;
+
+    // Preconditions:
+    // * colony_id was created by __new_id
+    #[doc(hidden)]
+    unsafe fn __new_handle(&self, index: usize, colony_id: Self::__Id) -> Self::Handle;
 
     #[doc(hidden)]
     fn __extract_index(handle: &Self::Handle) -> usize;
@@ -61,9 +67,11 @@ impl Guard for NoGuard {
         Self
     }
 
-    fn __new_id() -> Self::__Id {}
+    fn __sentinel_id() {}
 
-    fn __new_handle(&self, index: usize, _colony_id: ()) -> usize {
+    fn __new_id() {}
+
+    unsafe fn __new_handle(&self, index: usize, _colony_id: ()) -> usize {
         index
     }
 
@@ -96,9 +104,11 @@ impl Guard for FlagGuard {
         Self { occupied: true }
     }
 
-    fn __new_id() -> Self::__Id {}
+    fn __sentinel_id() {}
 
-    fn __new_handle(&self, index: usize, _colony_id: ()) -> usize {
+    fn __new_id() {}
+
+    unsafe fn __new_handle(&self, index: usize, _colony_id: ()) -> usize {
         index
     }
 
@@ -127,6 +137,8 @@ impl Sealed for FlagGuard {}
 const COLONY_ID_BITS: u32 = 44;
 const MAX_COLONY_ID: u64 = u64::pow(2, COLONY_ID_BITS) - 1;
 
+const SENTINEL_COLONY_ID: u64 = 0;
+
 const GENERATION_BITS: u32 = u64::BITS - COLONY_ID_BITS;
 const MAX_GENERATION: u32 = u32::pow(2, GENERATION_BITS) - 1;
 
@@ -135,29 +147,35 @@ const MAX_GENERATION: u32 = u32::pow(2, GENERATION_BITS) - 1;
 pub struct Generation {
     // Most significant `COLONY_ID_BITS` are for the colony ID, rest are the generation
     #[cfg(not(fuzzing))]
-    state: u64,
+    state: NonZeroU64,
     #[cfg(fuzzing)]
     #[allow(missing_docs)]
-    pub state: u64,
+    pub state: NonZeroU64,
 }
 
 impl Generation {
-    fn new(colony_id: u64, generation: u32) -> Self {
+    // Preconditions:
+    // * 0 < colony_id <= MAX_COLONY_ID
+    unsafe fn new(colony_id: u64, generation: u32) -> Self {
+        debug_assert_ne!(colony_id, 0);
         debug_assert!(colony_id <= MAX_COLONY_ID);
         debug_assert!(generation <= MAX_GENERATION);
 
-        Self {
-            state: (colony_id << GENERATION_BITS) | (generation as u64),
+        let state = (colony_id << GENERATION_BITS) | (generation as u64);
+
+        unsafe {
+            let state = NonZeroU64::new_unchecked(state);
+            Self { state }
         }
     }
 
     fn generation(&self) -> u32 {
         let mask = (1 << GENERATION_BITS) - 1;
-        (self.state & mask) as u32
+        (self.state.get() & mask) as u32
     }
 
     fn colony_id(&self) -> u64 {
-        self.state >> GENERATION_BITS
+        self.state.get() >> GENERATION_BITS
     }
 }
 
@@ -175,6 +193,8 @@ impl Debug for Generation {
 /// When an element is removed at an index in a colony, the generation is incremented.
 /// This generation is checked to make sure a handle created for a deleted element cannot be used to access a new element sharing the same index.
 /// The generation also contains information about the colony itself, to prevent aliasing of handles between colonies.
+///
+/// With the current implementation on 64-bit systems this type uses 16 bytes of memory and can be null pointer optimized.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct Handle {
     /// The index of the element referred to by the handle.
@@ -201,17 +221,26 @@ impl Guard for GenerationGuard {
         Self { generation: 0 }
     }
 
-    fn __new_id() -> Self::__Id {
-        static NEXT_COLONY_ID: AtomicU64 = AtomicU64::new(0);
-
-        NEXT_COLONY_ID
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| {
-                Some(id + 1).filter(|&new_id| new_id <= MAX_COLONY_ID)
-            })
-            .unwrap_or_else(|_| panic!("create create more than {} colonies", MAX_COLONY_ID))
+    fn __sentinel_id() -> u64 {
+        SENTINEL_COLONY_ID
     }
 
-    fn __new_handle(&self, index: usize, colony_id: u64) -> Handle {
+    fn __new_id() -> u64 {
+        static NEXT_COLONY_ID: AtomicU64 = AtomicU64::new(SENTINEL_COLONY_ID + 1);
+
+        let result = NEXT_COLONY_ID.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| {
+            Some(id + 1).filter(|&new_id| new_id <= MAX_COLONY_ID)
+        });
+
+        let result =
+            result.unwrap_or_else(|_| panic!("create create more than {} colonies", MAX_COLONY_ID));
+
+        debug_assert_ne!(result, 0);
+
+        result
+    }
+
+    unsafe fn __new_handle(&self, index: usize, colony_id: u64) -> Handle {
         debug_assert!(self.generation % 2 == 0);
         let generation = Generation::new(colony_id, self.generation);
         Handle { generation, index }

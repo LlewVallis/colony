@@ -33,6 +33,8 @@ pub type UnguardedColony<T> = Colony<T, NoGuard>;
 
 const EMPTY_SKIPFIELD: &[SkipfieldElement] = &[0, 0];
 
+const MAX_CAPACITY: usize = isize::MAX as usize;
+
 #[doc = include_str!("./doc.md")]
 pub struct Colony<T, G: Guard = GenerationGuard> {
     elements: NonNull<Slot<T, G>>,
@@ -50,7 +52,7 @@ pub struct Colony<T, G: Guard = GenerationGuard> {
 impl<T> Colony<T> {
     /// Constructs an empty colony using [`GenerationGuard`].
     ///
-    /// Does not allocate, but does do some atomic operations, so calling `new` is not free.
+    /// Does not allocate.
     /// See [`Colony::flagged`] and [`Colony::unguarded`] to create colonies with different guards.
     ///
     /// # Examples
@@ -112,7 +114,7 @@ impl<T, G: Guard> Default for Colony<T, G> {
             touched: 0,
             len: 0,
             next_free: IndexOpt::none(),
-            id: G::__new_id(),
+            id: G::__sentinel_id(),
         }
     }
 }
@@ -302,8 +304,7 @@ impl<T, G: Guard> Colony<T, G> {
     ///
     /// # Panics
     ///
-    /// This method will allocate if the colony's length is equal to its capacity.
-    /// If the allocation fails, this may cause a panic.
+    /// See [`reserve`](Self::reserve).
     ///
     /// # Examples
     ///
@@ -565,11 +566,7 @@ impl<T, G: Guard> Colony<T, G> {
         }
 
         unsafe {
-            ptr::write_bytes(
-                self.skipfield.as_ptr(),
-                0,
-                self.touched,
-            );
+            ptr::write_bytes(self.skipfield.as_ptr(), 0, self.touched);
         }
 
         self.id = G::__new_id();
@@ -586,7 +583,9 @@ impl<T, G: Guard> Colony<T, G> {
     /// # Panics
     ///
     /// * If this method allocates, an allocation failure may panic.
-    /// * If the capacity would grow over the (unspecified but reasonable) maximum.
+    /// * If the capacity would grow over `isize::MAX`.
+    /// * When using [`GenerationGuard`], this method creates a unique ID for the colony upon the first allocation.
+    ///   This method may panic if all available IDs have been exhausted.
     ///
     /// # Examples
     ///
@@ -608,22 +607,32 @@ impl<T, G: Guard> Colony<T, G> {
     // * len + additional > capacity
     #[cold]
     unsafe fn do_reserve(&mut self, additional: usize) {
-        let Some(new_cap) = self.len.checked_add(additional) else {
+        let new_cap = self.len.checked_add(additional);
+        let new_cap = new_cap.filter(|&new_cap| new_cap < MAX_CAPACITY);
+        let Some(new_cap) = new_cap else {
             panic!("capacity overflow");
         };
 
-        // Shouldn't overflow, but doesn't really matter if it does
+        let new_id = if self.capacity == 0 {
+            Some(G::__new_id())
+        } else {
+            None
+        };
+
         let new_cap = usize::max(new_cap, self.capacity * 2);
         let new_cap = usize::max(new_cap, Self::MIN_NON_ZERO_CAP);
 
         self.resize(new_cap);
+
+        if let Some(new_id) = new_id {
+            self.id = new_id;
+        }
     }
 
     // Preconditions:
     // * new_cap >= touched
     unsafe fn resize(&mut self, new_cap: usize) {
         debug_assert!(new_cap >= self.touched);
-
         let old_cap = self.capacity;
 
         let (old_layout, _) = Self::layout(old_cap).unwrap_unchecked();
@@ -946,9 +955,9 @@ mod test {
     use std::cmp::Ordering;
     use std::fmt::{Debug, Formatter};
     use std::sync::Arc;
-    use std::{fmt, iter, slice};
+    use std::{fmt, iter, mem, slice};
 
-    use crate::{Colony, UnguardedColony};
+    use crate::{Colony, Handle, UnguardedColony};
 
     const N: &[usize] = &[0, 1, 5, 10, 100, 1_000, 10_000, 100_000];
 
@@ -1101,6 +1110,12 @@ mod test {
         assert_eq!(handle_1.index, handle_2.index);
         assert_ne!(handle_1, handle_2);
         assert!(colony.get(handle_1).is_none());
+    }
+
+    #[test]
+    fn handle_is_null_pointer_optimized() {
+        assert_eq!(mem::size_of::<Handle>(), 16);
+        assert_eq!(mem::size_of::<Option<Handle>>(), 16);
     }
 
     #[test]

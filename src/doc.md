@@ -91,8 +91,8 @@ assert!(colony_1.get(handle_2).is_none());
 assert!(colony_2.get(handle_1).is_none());
 ```
 
-Because a unique ID is created for each colony, calls to `new` may crash after `2^44 - 1` colonies have been created.
-Exhuasting this limit would require creating a million colonies every second for more than 200 days.
+Because a unique ID is created for each colony, calls to `new` may crash after 16 trillion colonies have been created.
+Exhuasting this limit would require creating a million colonies every second for more than 185 days.
 
 ## `FlagGuard`
 
