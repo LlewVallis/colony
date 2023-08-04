@@ -8,7 +8,6 @@ use std::mem::ManuallyDrop;
 use std::ops::{Index, IndexMut};
 use std::panic::{RefUnwindSafe, UnwindSafe};
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::{fmt, mem, ptr};
 
 pub use guard::*;
@@ -34,28 +33,15 @@ pub type UnguardedColony<T> = Colony<T, NoGuard>;
 
 const EMPTY_SKIPFIELD: &[SkipfieldElement] = &[0, 0];
 
-const COLONY_ID_BITS: u32 = 5 * 8;
-const MAX_COLONY_ID: u64 = u64::pow(2, COLONY_ID_BITS) - 1;
-
-fn next_colony_id() -> u64 {
-    static NEXT_COLONY_ID: AtomicU64 = AtomicU64::new(0);
-
-    NEXT_COLONY_ID
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| {
-            Some(id + 1).filter(|&new_id| new_id <= MAX_COLONY_ID)
-        })
-        .unwrap_or_else(|_| panic!("create create more than {} colonies", MAX_COLONY_ID))
-}
-
 #[doc = include_str!("./doc.md")]
 pub struct Colony<T, G: Guard = GenerationGuard> {
-    id: u64,
     elements: NonNull<Slot<T, G>>,
     skipfield: NonNull<SkipfieldElement>,
     capacity: usize,
     touched: usize,
     len: usize,
     next_free: IndexOpt,
+    id: G::__Id,
 }
 
 impl<T> Colony<T> {
@@ -117,13 +103,13 @@ impl<T, G: Guard> Default for Colony<T, G> {
         };
 
         Self {
-            id: next_colony_id(),
             elements: NonNull::dangling(),
             skipfield,
             capacity: 0,
             touched: 0,
             len: 0,
             next_free: IndexOpt::none(),
+            id: G::__new_id(),
         }
     }
 }
@@ -347,7 +333,7 @@ impl<T, G: Guard> Colony<T, G> {
         let colony_id = self.id;
         let slot = self.slot_mut(free);
         slot.fill(value);
-        G::__new_handle(&slot.guard, colony_id, free)
+        G::__new_handle(&slot.guard, free, colony_id)
     }
 
     // Preconditions:
@@ -366,7 +352,7 @@ impl<T, G: Guard> Colony<T, G> {
         debug_assert!(self.len == self.touched);
 
         let slot = Slot::new_full(value);
-        let handle = G::__new_handle(&slot.guard, self.id, self.touched);
+        let handle = G::__new_handle(&slot.guard, self.touched, self.id);
 
         unsafe {
             self.elements.as_ptr().add(self.touched).write(slot);

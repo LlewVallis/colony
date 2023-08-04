@@ -39,7 +39,7 @@ impl<'a, T, G: Guard> Iterator for RawIter<'a, T, G> {
 
             let slot = self.colony.elements.as_ptr().add(self.current_index);
             let guard = &(*slot).guard;
-            let handle = G::__new_handle(guard, self.colony.id, self.current_index);
+            let handle = G::__new_handle(guard, self.current_index, self.colony.id);
 
             let elem = ptr::addr_of_mut!((*slot).inner.occupied);
             let elem = NonNull::new_unchecked(elem as *mut T);

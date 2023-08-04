@@ -1,13 +1,12 @@
 use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::hash::Hash;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::guard::sealed::Sealed;
 
 #[cfg(doc)]
 use crate::Colony;
-
-use crate::{COLONY_ID_BITS, MAX_COLONY_ID};
 
 /// A guard for each element in a colony to ensure safe usage.
 ///
@@ -20,10 +19,16 @@ pub trait Guard: Sealed {
     type Handle;
 
     #[doc(hidden)]
+    type __Id: Copy;
+
+    #[doc(hidden)]
     fn __new() -> Self;
 
     #[doc(hidden)]
-    fn __new_handle(&self, colony_id: u64, index: usize) -> Self::Handle;
+    fn __new_id() -> Self::__Id;
+
+    #[doc(hidden)]
+    fn __new_handle(&self, index: usize, colony_id: Self::__Id) -> Self::Handle;
 
     #[doc(hidden)]
     fn __extract_index(handle: &Self::Handle) -> usize;
@@ -38,7 +43,7 @@ pub trait Guard: Sealed {
 /// A marker trait for a [`Guard`] that enables use of safe methods like [`Colony::get`].
 pub trait CheckedGuard: Guard {
     #[doc(hidden)]
-    fn __check(&self, handle: &Self::Handle, colony_id: u64) -> bool;
+    fn __check(&self, handle: &Self::Handle, colony_id: Self::__Id) -> bool;
 }
 
 /// A ZST guard that provides minimal guarantees.
@@ -50,12 +55,15 @@ pub struct NoGuard;
 
 impl Guard for NoGuard {
     type Handle = usize;
+    type __Id = ();
 
     fn __new() -> Self {
         Self
     }
 
-    fn __new_handle(&self, _colony_id: u64, index: usize) -> usize {
+    fn __new_id() -> Self::__Id {}
+
+    fn __new_handle(&self, index: usize, _colony_id: ()) -> usize {
         index
     }
 
@@ -82,12 +90,15 @@ pub struct FlagGuard {
 
 impl Guard for FlagGuard {
     type Handle = usize;
+    type __Id = ();
 
     fn __new() -> Self {
         Self { occupied: true }
     }
 
-    fn __new_handle(&self, _colony_id: u64, index: usize) -> usize {
+    fn __new_id() -> Self::__Id {}
+
+    fn __new_handle(&self, index: usize, _colony_id: ()) -> usize {
         index
     }
 
@@ -106,13 +117,15 @@ impl Guard for FlagGuard {
 }
 
 impl CheckedGuard for FlagGuard {
-    fn __check(&self, _handle: &usize, _colony_id: u64) -> bool {
+    fn __check(&self, _handle: &usize, _colony_id: ()) -> bool {
         self.occupied
     }
 }
 
 impl Sealed for FlagGuard {}
 
+const COLONY_ID_BITS: u32 = 5 * 8;
+const MAX_COLONY_ID: u64 = u64::pow(2, COLONY_ID_BITS) - 1;
 const GENERATION_BITS: u32 = u64::BITS - COLONY_ID_BITS;
 const MAX_GENERATION: u32 = u32::pow(2, GENERATION_BITS) - 1;
 
@@ -177,12 +190,23 @@ pub struct GenerationGuard {
 
 impl Guard for GenerationGuard {
     type Handle = Handle;
+    type __Id = u64;
 
     fn __new() -> Self {
         Self { generation: 0 }
     }
 
-    fn __new_handle(&self, colony_id: u64, index: usize) -> Handle {
+    fn __new_id() -> Self::__Id {
+        static NEXT_COLONY_ID: AtomicU64 = AtomicU64::new(0);
+
+        NEXT_COLONY_ID
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| {
+                Some(id + 1).filter(|&new_id| new_id <= MAX_COLONY_ID)
+            })
+            .unwrap_or_else(|_| panic!("create create more than {} colonies", MAX_COLONY_ID))
+    }
+
+    fn __new_handle(&self, index: usize, colony_id: u64) -> Handle {
         debug_assert!(self.generation % 2 == 0);
         let generation = Generation::new(colony_id, self.generation);
         Handle { generation, index }
