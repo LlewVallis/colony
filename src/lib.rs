@@ -540,7 +540,7 @@ impl<T, G: Guard> Colony<T, G> {
     ///
     /// # Panics
     ///
-    /// When using [`GenerationalGuard], this may panic if all colony IDs have been exhausted.
+    /// When using [`GenerationGuard`], this may panic if all colony IDs have been exhausted.
     /// See [`Colony`] for more information about the colony ID limit.
     ///
     /// # Examples
