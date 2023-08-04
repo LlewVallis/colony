@@ -1,6 +1,7 @@
 #![no_main]
 
 use std::collections::HashMap;
+use std::num::NonZeroU64;
 use libfuzzer_sys::arbitrary::Arbitrary;
 use libfuzzer_sys::{arbitrary, fuzz_target};
 use colony::{Colony, Handle, Generation};
@@ -25,8 +26,11 @@ fuzz_target!(|operations: Vec<Operation>| {
                 assert!(old.is_none());
             },
             Operation::Remove((index, state)) => {
-                // Force it to be even
-                let state = state & (u64::MAX - 1);
+                if state == 0 || state % 2 != 0 {
+                    continue;
+                }
+
+                let state = NonZeroU64::new(state).unwrap();
                 let generation = Generation { state };
 
                 let handle = Handle { index, generation };
