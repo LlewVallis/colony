@@ -124,8 +124,9 @@ impl CheckedGuard for FlagGuard {
 
 impl Sealed for FlagGuard {}
 
-const COLONY_ID_BITS: u32 = 5 * 8;
+const COLONY_ID_BITS: u32 = 44;
 const MAX_COLONY_ID: u64 = u64::pow(2, COLONY_ID_BITS) - 1;
+
 const GENERATION_BITS: u32 = u64::BITS - COLONY_ID_BITS;
 const MAX_GENERATION: u32 = u32::pow(2, GENERATION_BITS) - 1;
 
@@ -133,7 +134,11 @@ const MAX_GENERATION: u32 = u32::pow(2, GENERATION_BITS) - 1;
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct Generation {
     // Most significant `COLONY_ID_BITS` are for the colony ID, rest are the generation
+    #[cfg(not(fuzzing))]
     state: u64,
+    #[cfg(fuzzing)]
+    #[allow(missing_docs)]
+    pub state: u64,
 }
 
 impl Generation {

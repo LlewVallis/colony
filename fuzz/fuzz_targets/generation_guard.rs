@@ -10,7 +10,7 @@ type T = u8;
 #[derive(Arbitrary, Debug)]
 enum Operation {
     Insert(T),
-    Remove((usize, u32)),
+    Remove((usize, u64)),
 }
 
 fuzz_target!(|operations: Vec<Operation>| {
@@ -24,8 +24,10 @@ fuzz_target!(|operations: Vec<Operation>| {
                 let old = values.insert(index, value);
                 assert!(old.is_none());
             },
-            Operation::Remove((index, generation)) => {
-                let generation = Generation(generation.wrapping_mul(2));
+            Operation::Remove((index, state)) => {
+                // Force it to be even
+                let state = state & (u64::MAX - 1);
+                let generation = Generation { state };
 
                 let handle = Handle { index, generation };
                 let expected = values.remove(&handle);
