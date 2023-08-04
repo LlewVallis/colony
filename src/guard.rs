@@ -7,6 +7,8 @@ use crate::guard::sealed::Sealed;
 #[cfg(doc)]
 use crate::Colony;
 
+use crate::{COLONY_ID_BITS, MAX_COLONY_ID};
+
 /// A guard for each element in a colony to ensure safe usage.
 ///
 /// This is a sealed trait, so only one of the supported guards can be used.
@@ -18,25 +20,25 @@ pub trait Guard: Sealed {
     type Handle;
 
     #[doc(hidden)]
-    fn new_full() -> Self;
+    fn __new() -> Self;
 
     #[doc(hidden)]
-    fn new_handle(&self, index: usize) -> Self::Handle;
+    fn __new_handle(&self, colony_id: u64, index: usize) -> Self::Handle;
 
     #[doc(hidden)]
-    fn extract_index(handle: &Self::Handle) -> usize;
+    fn __extract_index(handle: &Self::Handle) -> usize;
 
     #[doc(hidden)]
-    unsafe fn fill(&mut self);
+    unsafe fn __fill(&mut self);
 
     #[doc(hidden)]
-    unsafe fn empty(&mut self) -> bool;
+    unsafe fn __empty(&mut self) -> bool;
 }
 
 /// A marker trait for a [`Guard`] that enables use of safe methods like [`Colony::get`].
 pub trait CheckedGuard: Guard {
     #[doc(hidden)]
-    fn check(&self, handle: &Self::Handle) -> bool;
+    fn __check(&self, handle: &Self::Handle, colony_id: u64) -> bool;
 }
 
 /// A ZST guard that provides minimal guarantees.
@@ -49,21 +51,21 @@ pub struct NoGuard;
 impl Guard for NoGuard {
     type Handle = usize;
 
-    fn new_full() -> Self {
+    fn __new() -> Self {
         Self
     }
 
-    fn new_handle(&self, index: usize) -> Self::Handle {
+    fn __new_handle(&self, _colony_id: u64, index: usize) -> usize {
         index
     }
 
-    fn extract_index(handle: &usize) -> usize {
+    fn __extract_index(handle: &usize) -> usize {
         *handle
     }
 
-    unsafe fn fill(&mut self) {}
+    unsafe fn __fill(&mut self) {}
 
-    unsafe fn empty(&mut self) -> bool {
+    unsafe fn __empty(&mut self) -> bool {
         true
     }
 }
@@ -81,45 +83,70 @@ pub struct FlagGuard {
 impl Guard for FlagGuard {
     type Handle = usize;
 
-    fn new_full() -> Self {
+    fn __new() -> Self {
         Self { occupied: true }
     }
 
-    fn new_handle(&self, index: usize) -> Self::Handle {
+    fn __new_handle(&self, _colony_id: u64, index: usize) -> usize {
         index
     }
 
-    fn extract_index(handle: &usize) -> usize {
+    fn __extract_index(handle: &usize) -> usize {
         *handle
     }
 
-    unsafe fn fill(&mut self) {
+    unsafe fn __fill(&mut self) {
         self.occupied = true;
     }
 
-    unsafe fn empty(&mut self) -> bool {
+    unsafe fn __empty(&mut self) -> bool {
         self.occupied = false;
         true
     }
 }
 
 impl CheckedGuard for FlagGuard {
-    fn check(&self, _handle: &usize) -> bool {
+    fn __check(&self, _handle: &usize, _colony_id: u64) -> bool {
         self.occupied
     }
 }
 
 impl Sealed for FlagGuard {}
 
+const GENERATION_BITS: u32 = u64::BITS - COLONY_ID_BITS;
+const MAX_GENERATION: u32 = u32::pow(2, GENERATION_BITS) - 1;
+
 /// An opaque generation assigned to a [`Handle`].
 // An even value indicates an occupied slot, we can never leak an odd value
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct Generation(#[cfg(not(fuzzing))] u32, #[cfg(fuzzing)] pub u32);
+pub struct Generation {
+    // Most significant `COLONY_ID_BITS` are for the colony ID, rest are the generation
+    state: u64,
+}
+
+impl Generation {
+    fn new(colony_id: u64, generation: u32) -> Self {
+        debug_assert!(colony_id <= MAX_COLONY_ID);
+        debug_assert!(generation <= MAX_GENERATION);
+
+        Self {
+            state: (colony_id << GENERATION_BITS) | (generation as u64),
+        }
+    }
+
+    fn generation(&self) -> u32 {
+        let mask = (1 << GENERATION_BITS) - 1;
+        (self.state & mask) as u32
+    }
+
+    fn colony_id(&self) -> u64 {
+        self.state >> GENERATION_BITS
+    }
+}
 
 impl Debug for Generation {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        let value = self.0 / 2;
-        f.debug_tuple("Generation").field(&value).finish()
+        f.debug_tuple("Generation").field(&self.state).finish()
     }
 }
 
@@ -145,46 +172,42 @@ pub struct Handle {
 /// See [`Colony`] for more information about guards.
 #[allow(missing_debug_implementations)]
 pub struct GenerationGuard {
-    generation: Generation,
+    generation: u32,
 }
 
 impl Guard for GenerationGuard {
     type Handle = Handle;
 
-    fn new_full() -> Self {
-        Self {
-            generation: Generation(0),
-        }
+    fn __new() -> Self {
+        Self { generation: 0 }
     }
 
-    fn new_handle(&self, index: usize) -> Handle {
-        debug_assert!(self.generation.0 % 2 == 0);
-
-        Handle {
-            generation: self.generation,
-            index,
-        }
+    fn __new_handle(&self, colony_id: u64, index: usize) -> Handle {
+        debug_assert!(self.generation % 2 == 0);
+        let generation = Generation::new(colony_id, self.generation);
+        Handle { generation, index }
     }
 
-    fn extract_index(handle: &Handle) -> usize {
+    fn __extract_index(handle: &Handle) -> usize {
         handle.index
     }
 
-    unsafe fn fill(&mut self) {
-        debug_assert!(self.generation.0 % 2 == 1);
-        self.generation.0 += 1;
+    unsafe fn __fill(&mut self) {
+        debug_assert!(self.generation % 2 == 1);
+        self.generation += 1;
     }
 
-    unsafe fn empty(&mut self) -> bool {
-        debug_assert!(self.generation.0 % 2 == 0);
-        self.generation.0 += 1;
-        self.generation.0 != u32::MAX
+    unsafe fn __empty(&mut self) -> bool {
+        debug_assert!(self.generation % 2 == 0);
+        self.generation += 1;
+        self.generation != MAX_GENERATION
     }
 }
 
 impl CheckedGuard for GenerationGuard {
-    fn check(&self, handle: &Handle) -> bool {
-        self.generation == handle.generation
+    fn __check(&self, handle: &Handle, colony_id: u64) -> bool {
+        colony_id == handle.generation.colony_id()
+            && self.generation == handle.generation.generation()
     }
 }
 

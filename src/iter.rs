@@ -1,33 +1,30 @@
 use std::fmt::{Debug, Formatter};
 use std::iter::FusedIterator;
 use std::marker::PhantomData;
-use std::panic::{RefUnwindSafe, UnwindSafe};
 use std::ptr::NonNull;
 use std::{fmt, ptr};
 
 use crate::guard::Guard;
-use crate::skipfield::{SkipfieldElement, SkipfieldPtr, RIGHT};
-use crate::{Colony, GenerationGuard, Slot};
+use crate::skipfield::{SkipfieldPtr, RIGHT};
+use crate::{Colony, GenerationGuard};
 
-struct RawIter<T, G: Guard = GenerationGuard> {
-    skipfield: NonNull<SkipfieldElement>,
-    elements: NonNull<Slot<T, G>>,
+struct RawIter<'a, T, G: Guard = GenerationGuard> {
+    colony: &'a Colony<T, G>,
     current_index: usize,
     len: usize,
 }
 
-impl<T, G: Guard> RawIter<T, G> {
-    pub(super) fn new(colony: &Colony<T, G>) -> Self {
+impl<'a, T, G: Guard> RawIter<'a, T, G> {
+    pub(super) fn new(colony: &'a Colony<T, G>) -> Self {
         Self {
-            skipfield: colony.skipfield,
-            elements: colony.elements,
+            colony,
             current_index: 0,
             len: colony.len,
         }
     }
 }
 
-impl<T, G: Guard> Iterator for RawIter<T, G> {
+impl<'a, T, G: Guard> Iterator for RawIter<'a, T, G> {
     type Item = (G::Handle, NonNull<T>);
 
     fn next(&mut self) -> Option<(G::Handle, NonNull<T>)> {
@@ -36,13 +33,13 @@ impl<T, G: Guard> Iterator for RawIter<T, G> {
         }
 
         unsafe {
-            let skipfield = SkipfieldPtr::new(self.skipfield);
+            let skipfield = SkipfieldPtr::new(self.colony.skipfield);
             let offset = skipfield.read::<RIGHT>(self.current_index as isize);
             self.current_index += offset;
 
-            let slot = self.elements.as_ptr().add(self.current_index);
+            let slot = self.colony.elements.as_ptr().add(self.current_index);
             let guard = &(*slot).guard;
-            let handle = G::new_handle(guard, self.current_index);
+            let handle = G::__new_handle(guard, self.colony.id, self.current_index);
 
             let elem = ptr::addr_of_mut!((*slot).inner.occupied);
             let elem = NonNull::new_unchecked(elem as *mut T);
@@ -59,32 +56,23 @@ impl<T, G: Guard> Iterator for RawIter<T, G> {
     }
 }
 
-impl<T, G: Guard> FusedIterator for RawIter<T, G> {}
+impl<'a, T, G: Guard> FusedIterator for RawIter<'a, T, G> {}
 
-impl<T, G: Guard> ExactSizeIterator for RawIter<T, G> {}
+impl<'a, T, G: Guard> ExactSizeIterator for RawIter<'a, T, G> {}
 
-impl<T, G: Guard> Clone for RawIter<T, G> {
+impl<'a, T, G: Guard> Clone for RawIter<'a, T, G> {
     fn clone(&self) -> Self {
         Self {
-            skipfield: self.skipfield,
-            elements: self.elements,
+            colony: self.colony,
             current_index: self.current_index,
             len: self.len,
         }
     }
 }
 
-unsafe impl<T, G: Guard> Send for RawIter<T, G> where Colony<T, G>: Sync {}
-
-unsafe impl<T, G: Guard> Sync for RawIter<T, G> where Colony<T, G>: Sync {}
-
-impl<T, G: Guard> UnwindSafe for RawIter<T, G> where Colony<T, G>: RefUnwindSafe {}
-
-impl<T, G: Guard> RefUnwindSafe for RawIter<T, G> where Colony<T, G>: RefUnwindSafe {}
-
 /// The iterator returned by [`Colony::iter`].
 pub struct Iter<'a, T, G: Guard = GenerationGuard> {
-    raw: RawIter<T, G>,
+    raw: RawIter<'a, T, G>,
     _marker: PhantomData<&'a T>,
 }
 
@@ -177,7 +165,7 @@ impl<'a, T: Debug, G: Guard> Debug for Values<'a, T, G> {
 
 /// The iterator returned by [`Colony::iter_mut`].
 pub struct IterMut<'a, T, G: Guard = GenerationGuard> {
-    raw: RawIter<T, G>,
+    raw: RawIter<'a, T, G>,
     _marker: PhantomData<&'a mut T>,
 }
 
