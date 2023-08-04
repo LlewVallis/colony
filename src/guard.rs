@@ -130,7 +130,6 @@ const GENERATION_BITS: u32 = u64::BITS - COLONY_ID_BITS;
 const MAX_GENERATION: u32 = u32::pow(2, GENERATION_BITS) - 1;
 
 /// An opaque generation assigned to a [`Handle`].
-// An even value indicates an occupied slot, we can never leak an odd value
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct Generation {
     // Most significant `COLONY_ID_BITS` are for the colony ID, rest are the generation
@@ -170,6 +169,7 @@ impl Debug for Generation {
 /// A handle is composed of an index and a generation.
 /// When an element is removed at an index in a colony, the generation is incremented.
 /// This generation is checked to make sure a handle created for a deleted element cannot be used to access a new element sharing the same index.
+/// The generation also contains information about the colony itself, to prevent aliasing of handles between colonies.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct Handle {
     /// The index of the element referred to by the handle.
@@ -180,7 +180,7 @@ pub struct Handle {
     pub generation: Generation,
 }
 
-/// The default guard that prevents aliasing of handles within a single colony.
+/// The default guard that guarantees globally unique handles.
 ///
 /// See [`Colony`] for more information about guards.
 #[allow(missing_debug_implementations)]

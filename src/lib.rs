@@ -47,7 +47,7 @@ pub struct Colony<T, G: Guard = GenerationGuard> {
 impl<T> Colony<T> {
     /// Constructs an empty colony using [`GenerationGuard`].
     ///
-    /// Does not allocate.
+    /// Does not allocate, but does do some atomic operations, so calling `new` is not free.
     /// See [`Colony::flagged`] and [`Colony::unguarded`] to create colonies with different guards.
     ///
     /// # Examples
@@ -197,7 +197,8 @@ impl<T, G: Guard> Colony<T, G> {
 
     /// Returns a reference to a element by the handle returned by [`insert`](Colony::insert).
     ///
-    /// Some care needs to be taken with respect to aliasing of handles, see [`Colony`] for more information.
+    /// Some care needs to be taken with respect to aliasing of handles when not using [`GenerationGuard`].
+    /// See [`Colony`] for more information.
     ///
     /// # Examples
     ///
@@ -293,8 +294,8 @@ impl<T, G: Guard> Colony<T, G> {
 
     /// Inserts an element into the colony at an unspecified index.
     ///
-    /// This method has the potential to alias handles with previously inserted and removed elements, or with handles produced from other colonies.
-    /// See the documentation for [`Colony`] for more information about handle aliasing.
+    /// Some care needs to be taken with respect to aliasing of handles when not using [`GenerationGuard`].
+    /// See [`Colony`] for more information.
     ///
     /// # Panics
     ///
@@ -366,7 +367,8 @@ impl<T, G: Guard> Colony<T, G> {
 
     /// Removes the element with the given handle, if it exists.
     ///
-    /// Some care needs to be taken with respect to aliasing of handles, see [`Colony`] for more information.
+    /// Some care needs to be taken with respect to aliasing of handle when not using [`GenerationGuard`].
+    /// See [`Colony`] for more information.
     ///
     /// # Examples
     ///
