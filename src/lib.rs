@@ -36,6 +36,9 @@ const EMPTY_SKIPFIELD: &[SkipfieldElement] = &[0, 0];
 #[doc = include_str!("./doc.md")]
 pub struct Colony<T, G: Guard = GenerationGuard> {
     elements: NonNull<Slot<T, G>>,
+    // Initialized from [-1, capacity]
+    // Element at -1 and elements in [len, capacity] are zero
+    // Valid for reads (but not writes) even when capacity is zero
     skipfield: NonNull<SkipfieldElement>,
     capacity: usize,
     touched: usize,
@@ -529,6 +532,52 @@ impl<T, G: Guard> Colony<T, G> {
         self.next_free = IndexOpt::some(start);
     }
 
+    /// Removes all elements from the colony.
+    ///
+    /// This is equivalent to `*self = Colony::default()`, except that the capacity remains unchanged.
+    /// This is an `O(n)` operation even if `T` doesn't implement `Drop`.
+    ///
+    /// # Panics
+    ///
+    /// When using [`GenerationalGuard], this may panic if all colony IDs have been exhausted.
+    /// See [`Colony`] for more information about the colony ID limit.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use colony::Colony;
+    /// let mut colony = Colony::new();
+    ///
+    /// let foo = colony.insert("foo");
+    /// colony.clear();
+    /// let bar = colony.insert("bar");
+    ///
+    /// assert_eq!(colony.get(foo), None);
+    /// assert_eq!(colony.get(bar), Some(&"bar"));
+    /// ```
+    pub fn clear(&mut self) {
+        if mem::needs_drop::<(G, T)>() {
+            for value in self.values_mut() {
+                unsafe {
+                    ptr::drop_in_place(value);
+                }
+            }
+        }
+
+        unsafe {
+            ptr::write_bytes(
+                self.skipfield.as_ptr(),
+                0,
+                self.touched,
+            );
+        }
+
+        self.id = G::__new_id();
+        self.len = 0;
+        self.touched = 0;
+        self.next_free = IndexOpt::none();
+    }
+
     /// Increases the capacity of the colony to at least `self.len() + additional`.
     ///
     /// If the colony is already sufficiently large, this is a no-op.
@@ -1018,6 +1067,40 @@ mod test {
             drop(colony);
             assert_eq!(Arc::strong_count(&arc), 1);
         }
+    }
+
+    #[test]
+    fn different_colonies_dont_alias() {
+        let mut colony_1 = Colony::new();
+        let handle_1 = colony_1.insert(1);
+
+        let mut colony_2 = Colony::new();
+        let handle_2 = colony_2.insert(1);
+
+        assert_ne!(handle_1, handle_2);
+        assert!(colony_1.get(handle_2).is_none());
+        assert!(colony_2.get(handle_1).is_none());
+    }
+
+    #[test]
+    fn clear() {
+        let mut colony = Colony::new();
+        let handle = colony.insert(42);
+        colony.clear();
+        assert!(colony.get(handle).is_none());
+    }
+
+    #[test]
+    fn insert_after_clear_doesnt_alias() {
+        let mut colony = Colony::new();
+
+        let handle_1 = colony.insert(1);
+        colony.clear();
+        let handle_2 = colony.insert(2);
+
+        assert_eq!(handle_1.index, handle_2.index);
+        assert_ne!(handle_1, handle_2);
+        assert!(colony.get(handle_1).is_none());
     }
 
     #[test]
